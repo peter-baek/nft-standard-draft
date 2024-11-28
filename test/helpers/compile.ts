@@ -169,7 +169,6 @@ export async function compileContracts(chain: blockchain) {
   });
 
   await it("should save new verification keys", async () => {
-    isDifferent = true;
     if (isDifferent) {
       console.log("saving new verification keys");
       let vk: Contracts = {

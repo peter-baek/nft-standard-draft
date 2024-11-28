@@ -59,7 +59,6 @@ import {
   ValidatorsVoting,
   ValidatorsListEvent,
   ValidatorsListData,
-  checkValidatorsList,
   UpgradeAuthorityDatabase,
   ValidatorsDecision,
   ValidatorDecisionType,
@@ -68,6 +67,7 @@ import {
   ValidatorsVotingProof,
 } from "../src/upgrade/index.js";
 import { processArguments } from "./helpers/utils.js";
+import { checkValidatorsList } from "./helpers/validators.js";
 import { nftVerificationKeys } from "../src/vk.js";
 import { randomMetadata } from "./helpers/metadata.js";
 import { MetadataFieldTypeValues, Metadata } from "../src/metadata/index.js";
@@ -463,6 +463,17 @@ describe("NFT contracts tests", () => {
       expiry,
     });
     await fetchMinaAccount({ publicKey: creator, force: true });
+    const whitelist =
+      adminContract instanceof NFTWhitelistedAdmin
+        ? await Whitelist.create({
+            list: TEST_ACCOUNTS.slice(5)
+              .map((user) => ({
+                address: user.publicKey,
+                amount: 50_000_000_000,
+              }))
+              .slice(0, 5),
+          })
+        : undefined;
 
     const tx = await Mina.transaction(
       {
@@ -474,18 +485,14 @@ describe("NFT contracts tests", () => {
         AccountUpdate.fundNewAccount(creator, 3);
 
         if (adminContract instanceof NFTWhitelistedAdmin) {
+          if (!whitelist) {
+            throw new Error("Whitelist is undefined");
+          }
           await adminContract.deploy({
             admin: creator,
             upgradeAuthority,
-            whitelist: await Whitelist.create({
-              list: TEST_ACCOUNTS.slice(5)
-                .map((user) => ({
-                  address: user.publicKey,
-                  amount: 50_000_000_000,
-                }))
-                .slice(0, 5),
-            }),
-            uri: `zkcloudworker@$0.18.29#NFTWhitelistedAdmin`,
+            whitelist,
+            uri: `zkcloudworker@$0.20.0#NFTWhitelistedAdmin`,
             isPaused: Bool(false),
             canPause: Bool(true),
           });
