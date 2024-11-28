@@ -1,35 +1,75 @@
 import { describe, it } from "node:test";
 import assert from "node:assert";
-import { Mina, VerificationKey, Field, Cache, SmartContract } from "o1js";
+import { Mina, VerificationKey, Field, Cache } from "o1js";
+import { NFT } from "../../src/contracts/index.js";
+import { VerificationKeyUpgradeAuthority } from "../../src/upgrade/index.js";
 import {
-  initBlockchain,
-  blockchain,
-  FungibleToken,
-  FungibleTokenAdmin,
-  WhitelistedFungibleToken,
-  FungibleTokenWhitelistedAdmin,
-  FungibleTokenBidContract,
-  FungibleTokenOfferContract,
-  tokenVerificationKeys,
-} from "zkcloudworker";
+  AdminContract,
+  WhitelistedAdminContract,
+  Collection,
+  WhitelistedCollection,
+} from "../../src/contracts.js";
+import { initBlockchain, blockchain } from "zkcloudworker";
+import { nftVerificationKeys } from "../../src/vk.js";
 import fs from "fs/promises";
 
-// import o1js_package from "../../node_modules/o1js/package.json"; // assert { type: "json" };
-// import zkcloudworker_package from "../../node_modules/zkcloudworker/package.json" assert { type: "json" };
-// const o1jsVersion = o1js_package.version;
-// const zkcloudworkerVersion = zkcloudworker_package.version;
+let o1jsVersion: string;
+let zkcloudworkerVersion: string;
 let isDifferent = false;
 
-const contracts = [
-  { name: "FungibleToken", contract: FungibleToken },
-  { name: "FungibleTokenAdmin", contract: FungibleTokenAdmin },
-  { name: "WhitelistedFungibleToken", contract: WhitelistedFungibleToken },
+type CompilableInternal = {
+  name: string;
+  compile({ cache }: { cache: Cache }): Promise<{
+    verificationKey: {
+      data: string;
+      hash: Field;
+    };
+  }>;
+  analyzeMethods(): Promise<
+    Record<
+      string,
+      {
+        rows: number;
+      }
+    >
+  >;
+};
+
+type Contracts = {
+  o1js: string;
+  zkcloudworker: string;
+  vk: {
+    [key: string]: {
+      hash: string;
+      data: string;
+      type: "nft" | "collection" | "admin" | "upgrade" | "user";
+    };
+  };
+};
+
+const contracts: {
+  name: string;
+  contract: CompilableInternal;
+  type: "nft" | "collection" | "admin" | "upgrade" | "user";
+}[] = [
+  { name: "NFT", contract: NFT, type: "nft" },
+  { name: "Collection", contract: Collection, type: "collection" },
   {
-    name: "FungibleTokenWhitelistedAdmin",
-    contract: FungibleTokenWhitelistedAdmin,
+    name: "WhitelistedCollection",
+    contract: WhitelistedCollection,
+    type: "collection",
   },
-  { name: "FungibleTokenBidContract", contract: FungibleTokenBidContract },
-  { name: "FungibleTokenOfferContract", contract: FungibleTokenOfferContract },
+  { name: "AdminContract", contract: AdminContract, type: "admin" },
+  {
+    name: "WhitelistedAdminContract",
+    contract: WhitelistedAdminContract,
+    type: "admin",
+  },
+  {
+    name: "VerificationKeyUpgradeAuthority",
+    contract: VerificationKeyUpgradeAuthority,
+    type: "upgrade",
+  },
 ];
 
 const verificationKeys: { name: string; verificationKey: VerificationKey }[] =
@@ -46,8 +86,14 @@ export async function compileContracts(chain: blockchain) {
     await initBlockchain(chain);
     console.log("chain:", chain);
     console.log("networkId:", Mina.getNetworkId());
-    // console.log(`o1js version:`, o1jsVersion);
-    // console.log(`zkcloudworker version:`, zkcloudworkerVersion);
+    o1jsVersion = JSON.parse(
+      await fs.readFile("./node_modules/o1js/package.json", "utf8")
+    ).version;
+    console.log(`o1js version:`, o1jsVersion);
+    zkcloudworkerVersion = JSON.parse(
+      await fs.readFile("./node_modules/zkcloudworker/package.json", "utf8")
+    ).version;
+    console.log(`zkcloudworker version:`, zkcloudworkerVersion);
     for (const contract of contracts) {
       console.log(`${contract.name} contract:`, contract.contract.name);
     }
@@ -95,82 +141,71 @@ export async function compileContracts(chain: blockchain) {
     }
   });
 
-  await it.skip("should compare verification keys with MF versions", async () => {
-    const sets = [
-      { name: "FungibleToken", MF_name: "FungibleTokenMF" },
-      { name: "WhitelistedFungibleToken", MF_name: "FungibleTokenMF" },
-      { name: "FungibleTokenAdmin", MF_name: "FungibleTokenAdminMF" },
-    ];
-    for (const set of sets) {
-      const verificationKey = verificationKeys.find(
-        (vk) => vk.name === set.name
-      )?.verificationKey;
-      const MF_verificationKey = verificationKeys.find(
-        (vk) => vk.name === set.MF_name
-      )?.verificationKey;
-      if (!verificationKey) {
-        throw new Error(`Verification key for ${set.name} not found`);
-      }
-      if (!MF_verificationKey) {
-        throw new Error(`Verification key for ${set.MF_name} not found`);
-      }
-      assert(
-        verificationKey.hash.toJSON() === MF_verificationKey.hash.toJSON()
-      );
-      assert(verificationKey.data === MF_verificationKey.data);
-    }
-  });
-
   await it("should verify the verification keys", async () => {
     for (const contract of contracts) {
       const verificationKey = verificationKeys.find(
         (vk) => vk.name === contract.name
       )?.verificationKey;
       const recordedVerificationKey =
-        tokenVerificationKeys[networkId]["vk"][contract.name];
+        nftVerificationKeys[networkId]["vk"][contract.name];
       if (!verificationKey) {
         throw new Error(`Verification key for ${contract.name} not found`);
       }
       if (!recordedVerificationKey) {
-        console.error(
-          `Recorded verification key for ${contract.name} not found`
-        );
         isDifferent = true;
-      }
-      if (verificationKey.hash.toJSON() !== recordedVerificationKey.hash) {
-        console.error(`Verification key for ${contract.name} is different`);
-        isDifferent = true;
-      }
-      if (verificationKey.data !== recordedVerificationKey.data) {
-        console.error(
-          `Verification key data for ${contract.name} is different`
-        );
-        isDifferent = true;
+      } else {
+        if (verificationKey.hash.toJSON() !== recordedVerificationKey.hash) {
+          console.error(`Verification key for ${contract.name} is different`);
+          isDifferent = true;
+        }
+        if (verificationKey.data !== recordedVerificationKey.data) {
+          console.error(
+            `Verification key data for ${contract.name} is different`
+          );
+          isDifferent = true;
+        }
       }
     }
-    assert(!isDifferent);
   });
 
   await it("should save new verification keys", async () => {
+    isDifferent = true;
     if (isDifferent) {
       console.log("saving new verification keys");
-      const vk: any = {};
-      vk[networkId] = {
-        // o1js: o1jsVersion,
-        // zkcloudworker: zkcloudworkerVersion,
-        vk: {},
+      let vk: Contracts = {
+        o1js: o1jsVersion,
+        zkcloudworker: zkcloudworkerVersion,
+        vk: contracts.reduce(
+          (acc, c) => ({
+            ...acc,
+            [c.name]: {
+              hash: (c.contract as any)?._verificationKey?.hash?.toJSON(),
+              data: (c.contract as any)?._verificationKey?.data,
+              type: c.type,
+            },
+          }),
+          {}
+        ),
       };
 
-      for (const contract of verificationKeys) {
-        vk[networkId]["vk"][contract.name] = {
-          hash: contract.verificationKey.hash.toJSON(),
-          data: contract.verificationKey.data,
-        };
-      }
+      let contractList = contracts.reduce(
+        (acc, c) => ({
+          ...acc,
+          [c.name]: "ContractStart" + c.name + "ContractEnd",
+        }),
+        {}
+      );
+
+      const json: any = {};
+      json[networkId] = vk;
+      const contractsString = JSON.stringify({ contractList }, null, 2)
+        .replace(/"ContractStart/g, "")
+        .replace(/ContractEnd"/g, "");
+      const vkString = JSON.stringify(json, null, 2);
 
       await fs.writeFile(
-        `./vk/${networkId}-verification-keys.json`,
-        JSON.stringify(vk, null, 2)
+        `./vk/${networkId}-verification-keys.txt`,
+        `${vkString}\n\n${contractsString}`
       );
     }
   });

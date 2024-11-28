@@ -12,6 +12,9 @@ import {
   FeatureFlags,
   Void,
   Bool,
+  Nullifier,
+  PrivateKey,
+  Provable,
 } from "o1js";
 import {
   fieldFromString,
@@ -20,6 +23,10 @@ import {
 } from "../contracts/index.js";
 import { createIpfsURL, deserializeIndexedMerkleMap } from "zkcloudworker";
 import { ValidatorsListData } from "./upgrade.js";
+import MinaSigner from "mina-signer";
+
+type Chain = "devnet" | "zeko";
+const chain: Chain = "zeko" as Chain;
 
 export {
   ValidatorsList,
@@ -79,8 +86,6 @@ class ValidatorsState extends Struct({
   chainId: Field,
   /** Merkle root of the ValidatorsList */
   root: Field,
-  /** Sum of the hashes of validators' public keys */
-  hashSum: Field,
   /** Number of validators */
   count: UInt32,
 }) {
@@ -92,7 +97,6 @@ class ValidatorsState extends Struct({
   static assertEquals(a: ValidatorsState, b: ValidatorsState) {
     a.chainId.assertEquals(b.chainId);
     a.root.assertEquals(b.root);
-    a.hashSum.assertEquals(b.hashSum);
     a.count.assertEquals(b.count);
   }
 
@@ -112,7 +116,6 @@ class ValidatorsState extends Struct({
     return new ValidatorsState({
       chainId: Field(0),
       root: Field(0),
-      hashSum: Field(0),
       count: UInt32.zero,
     });
   }
@@ -225,6 +228,8 @@ class UpgradeDatabaseState extends Struct({
  * Represents a decision made by the validators.
  */
 class ValidatorsDecision extends Struct({
+  /** Message to be signed when producing the nullifier, also serves as the nonce to prevent replay attacks */
+  message: Field,
   /** Type of decision (e.g., 'updateDatabase') */
   decisionType: Field,
   /** UpgradeAuthority contract address */
@@ -246,12 +251,31 @@ class ValidatorsDecision extends Struct({
    * @param b Second `ValidatorsDecision` instance.
    */
   static assertEquals(a: ValidatorsDecision, b: ValidatorsDecision) {
+    a.message.assertEquals(b.message);
     a.decisionType.assertEquals(b.decisionType);
     a.contractAddress.assertEquals(b.contractAddress);
     a.chainId.assertEquals(b.chainId);
     ValidatorsState.assertEquals(a.validators, b.validators);
     UpgradeDatabaseState.assertEquals(a.upgradeDatabase, b.upgradeDatabase);
     a.expiry.assertEquals(b.expiry);
+  }
+
+  createNullifierMessage(): Field[] {
+    return [this.message, ...ValidatorsDecision.toFields(this)];
+  }
+
+  createJsonNullifier(params: {
+    network: "mainnet" | "testnet";
+    privateKey: PrivateKey;
+  }) {
+    const { network, privateKey } = params;
+    const minaSigner = new MinaSigner({ network });
+    const message = this.createNullifierMessage();
+    const nullifier = minaSigner.createNullifier(
+      message.map((field) => field.toBigInt()),
+      privateKey.toBase58()
+    );
+    return nullifier;
   }
 }
 
@@ -261,83 +285,83 @@ class ValidatorsDecision extends Struct({
 class ValidatorsDecisionState extends Struct({
   /** The validators' decision */
   decision: ValidatorsDecision,
-  /** Sum of the hashes of validators who have voted */
-  hashSum: Field,
-  /** Count of votes in favor */
-  count: UInt32,
+  /** Indexed Merkle Map root of the validators who have voted */
+  alreadyVoted: Field,
+  /** Number of votes in favor of the decision */
+  yesVotes: UInt32,
+  /** Number of votes against the decision */
+  noVotes: UInt32,
+  /** Number of votes of abstention */
+  abstainVotes: UInt32,
 }) {
+  static startVoting(decision: ValidatorsDecision) {
+    return new ValidatorsDecisionState({
+      decision,
+      alreadyVoted: new ValidatorsList().root,
+      yesVotes: UInt32.zero,
+      noVotes: UInt32.zero,
+      abstainVotes: UInt32.zero,
+    });
+  }
   /**
-   * Records a vote in favor of the decision by the given validator.
-   * @param decision The validators' decision.
-   * @param validatorAddress The public key of the validator.
-   * @param validatorsList The ValidatorsList.
+   * Records a vote
+   * @param validatorNullifier The nullifier of the validator.
+   * @param validatorsList The ValidatorsList containing authorized validators.
+   * @param votedList The ValidatorsList tracking who has already voted.
+   * @param yes Whether this is a "yes" vote.
+   * @param no Whether this is a "no" vote.
+   * @param abstain Whether this is an "abstain" vote.
    * @param signature The signature of the validator.
    * @returns A new `ValidatorsDecisionState` reflecting the vote.
    */
-  static vote(
-    decision: ValidatorsDecision,
-    validatorAddress: PublicKey,
+  vote(
+    validatorNullifier: Nullifier,
     validatorsList: ValidatorsList,
+    votedList: ValidatorsList,
+    yes: Bool,
+    no: Bool,
+    abstain: Bool,
     signature: Signature
   ) {
-    const hash = Poseidon.hashPacked(PublicKey, validatorAddress);
+    const publicKey = validatorNullifier.getPublicKey();
+    const key = validatorNullifier.key();
+    validatorNullifier.verify(this.decision.createNullifierMessage());
+
+    const previousVotesCount = this.yesVotes
+      .add(this.noVotes)
+      .add(this.abstainVotes);
+    const yesVotes = this.yesVotes.add(
+      Provable.if(yes, UInt32.from(1), UInt32.from(0))
+    );
+    const noVotes = this.noVotes.add(
+      Provable.if(no, UInt32.from(1), UInt32.from(0))
+    );
+    const abstainVotes = this.abstainVotes.add(
+      Provable.if(abstain, UInt32.from(1), UInt32.from(0))
+    );
+    // Ensure exactly one vote type is selected
+    previousVotesCount
+      .add(UInt32.from(1))
+      .assertEquals(yesVotes.add(noVotes).add(abstainVotes));
+
+    const hash = Poseidon.hashPacked(PublicKey, publicKey);
+    validatorsList.root.assertEquals(this.decision.validators.root);
     validatorsList
       .get(hash)
       .assertBool("Wrong ValidatorsList format")
       .assertTrue("Validator doesn't have authority to sign");
     signature
-      .verify(validatorAddress, ValidatorsDecision.toFields(decision))
+      .verify(publicKey, ValidatorsDecision.toFields(this.decision))
       .assertTrue("Wrong validator signature");
-    decision.validators.root.assertEquals(validatorsList.root);
+    this.decision.validators.root.assertEquals(validatorsList.root);
+    votedList.root.assertEquals(this.alreadyVoted);
+    votedList.insert(key, Field(1));
     return new ValidatorsDecisionState({
-      decision,
-      count: UInt32.from(1), // count as vote for the decision
-      hashSum: hash,
-    });
-  }
-
-  /**
-   * Records an abstention or vote against the decision by the given validator.
-   * @param decision The validators' decision.
-   * @param validatorAddress The public key of the validator.
-   * @param validatorsList The ValidatorsList.
-   * @returns A new `ValidatorsDecisionState` reflecting the abstention.
-   */
-  static abstain(
-    decision: ValidatorsDecision,
-    validatorAddress: PublicKey,
-    validatorsList: ValidatorsList
-    // We do not require the signature if the vote is not for the decision
-  ) {
-    const hash = Poseidon.hashPacked(PublicKey, validatorAddress);
-    validatorsList
-      .get(hash)
-      .assertBool("Wrong ValidatorsList format")
-      .assertTrue("Validator doesn't have authority to sign");
-    decision.validators.root.assertEquals(validatorsList.root);
-    return new ValidatorsDecisionState({
-      decision,
-      count: UInt32.zero, // count as abstain or against
-      hashSum: hash,
-    });
-  }
-
-  /**
-   * Merges two `ValidatorsDecisionState` instances.
-   * @param state1 The first decision state.
-   * @param state2 The second decision state.
-   * @returns A new `ValidatorsDecisionState` representing the combined state.
-   */
-  static merge(
-    state1: ValidatorsDecisionState,
-    state2: ValidatorsDecisionState
-  ) {
-    ValidatorsDecision.assertEquals(state1.decision, state2.decision);
-
-    return new ValidatorsDecisionState({
-      decision: state1.decision,
-      count: state1.count.add(state2.count),
-      hashSum: state1.hashSum.add(state2.hashSum),
+      decision: this.decision,
+      alreadyVoted: votedList.root,
+      yesVotes,
+      noVotes,
+      abstainVotes,
     });
   }
 
@@ -348,8 +372,10 @@ class ValidatorsDecisionState extends Struct({
    */
   static assertEquals(a: ValidatorsDecisionState, b: ValidatorsDecisionState) {
     ValidatorsDecision.assertEquals(a.decision, b.decision);
-    a.count.assertEquals(b.count);
-    a.hashSum.assertEquals(b.hashSum);
+    a.alreadyVoted.assertEquals(b.alreadyVoted);
+    a.yesVotes.assertEquals(b.yesVotes);
+    a.noVotes.assertEquals(b.noVotes);
+    a.abstainVotes.assertEquals(b.abstainVotes);
   }
 }
 
@@ -359,49 +385,60 @@ class ValidatorsDecisionState extends Struct({
 const ValidatorsVoting = ZkProgram({
   name: "ValidatorsVoting",
   publicInput: ValidatorsDecisionState,
+  publicOutput: ValidatorsDecisionState,
 
   methods: {
     /**
-     * Records a vote in favor of a decision.
+     * Starts the voting process for a decision.
      */
-    vote: {
-      privateInputs: [ValidatorsDecision, PublicKey, ValidatorsList, Signature],
+    startVoting: {
+      privateInputs: [ValidatorsDecision],
 
       async method(
         state: ValidatorsDecisionState,
-        decision: ValidatorsDecision,
-        validatorAddress: PublicKey,
-        validatorsList: ValidatorsList,
-        signature: Signature
+        decision: ValidatorsDecision
       ) {
-        const calculatedState = ValidatorsDecisionState.vote(
-          decision,
-          validatorAddress,
-          validatorsList,
-          signature
-        );
+        const calculatedState = ValidatorsDecisionState.startVoting(decision);
         ValidatorsDecisionState.assertEquals(state, calculatedState);
+        return { publicOutput: calculatedState };
       },
     },
-
     /**
-     * Records an abstention or vote against a decision.
+     * Records a vote
      */
-    abstain: {
-      privateInputs: [ValidatorsDecision, PublicKey, ValidatorsList],
+    vote: {
+      privateInputs: [
+        ValidatorsDecision,
+        Nullifier,
+        ValidatorsList,
+        ValidatorsList,
+        Bool,
+        Bool,
+        Bool,
+        Signature,
+      ],
 
       async method(
         state: ValidatorsDecisionState,
         decision: ValidatorsDecision,
-        validatorAddress: PublicKey,
-        validatorsList: ValidatorsList
+        nullifier: Nullifier,
+        validatorsList: ValidatorsList,
+        votedList: ValidatorsList,
+        yes: Bool,
+        no: Bool,
+        abstain: Bool,
+        signature: Signature
       ) {
-        const calculatedState = ValidatorsDecisionState.abstain(
-          decision,
-          validatorAddress,
-          validatorsList
+        const calculatedState = state.vote(
+          nullifier,
+          validatorsList,
+          votedList,
+          yes,
+          no,
+          abstain,
+          signature
         );
-        ValidatorsDecisionState.assertEquals(state, calculatedState);
+        return { publicOutput: calculatedState };
       },
     },
 
@@ -413,16 +450,17 @@ const ValidatorsVoting = ZkProgram({
 
       async method(
         state: ValidatorsDecisionState,
-        proof1: SelfProof<ValidatorsDecisionState, void>,
-        proof2: SelfProof<ValidatorsDecisionState, void>
+        proof1: SelfProof<ValidatorsDecisionState, ValidatorsDecisionState>,
+        proof2: SelfProof<ValidatorsDecisionState, ValidatorsDecisionState>
       ) {
         proof1.verify();
         proof2.verify();
-        const calculatedState = ValidatorsDecisionState.merge(
-          proof1.publicInput,
+        ValidatorsDecisionState.assertEquals(state, proof1.publicInput);
+        ValidatorsDecisionState.assertEquals(
+          proof1.publicOutput,
           proof2.publicInput
         );
-        ValidatorsDecisionState.assertEquals(state, calculatedState);
+        return { publicOutput: proof2.publicOutput };
       },
     },
   },
@@ -432,10 +470,10 @@ const ValidatorsVoting = ZkProgram({
 class ValidatorsVotingNativeProof extends ZkProgram.Proof(ValidatorsVoting) {}
 class ValidatorsVotingProof extends DynamicProof<
   ValidatorsDecisionState,
-  Void
+  ValidatorsDecisionState
 > {
   static publicInputType = ValidatorsDecisionState;
-  static publicOutputType = Void;
+  static publicOutputType = ValidatorsDecisionState;
   static maxProofsVerified = 2 as const;
   static featureFlags = FeatureFlags.allMaybe;
 }
@@ -467,9 +505,6 @@ async function checkValidatorsList(params: {
     hashSum = hashSum.add(key);
   }
 
-  if (data.hashSum !== hashSum.toJSON()) {
-    throw new Error("Invalid validators list hash sum");
-  }
   const map = deserializeIndexedMerkleMap({
     serializedIndexedMap: data.map,
     type: ValidatorsList,
@@ -490,9 +525,6 @@ async function checkValidatorsList(params: {
       throw new Error("Invalid validators list root");
     }
 
-    if (hashSum.equals(validators.hashSum).toBoolean() === false) {
-      throw new Error("Invalid validators list hash sum");
-    }
     if (Number(validators.count.toBigint()) > count) {
       throw new Error("Invalid validators list count");
     }
