@@ -15,7 +15,7 @@ import {
   loadIndexedMerkleMap,
   createIpfsURL,
   IndexedMapSerialized,
-} from "zkcloudworker";
+} from "@minatokens/storage";
 import {
   Storage,
   UpgradeAuthorityBase,
@@ -26,11 +26,9 @@ import {
   UpgradeAuthorityDatabase,
   ValidatorsState,
   UpgradeDatabaseState,
-  ValidatorsList,
   ValidatorsVotingProof,
   ValidatorDecisionType,
   UpgradeDatabaseStatePacked,
-  checkValidatorsList,
 } from "./validators.js";
 
 export {
@@ -153,15 +151,6 @@ class VerificationKeyUpgradeAuthority
    */
   async setValidatorsList(validators: ValidatorsState, storage: Storage) {
     this.validators.set(validators.hash());
-    // This does not create a constraint on the storage,
-    // serves to prevent deployment errors.
-    // Can be replaced with Data Availability proof in the future.
-    // TODO: consider using Celestia DA for this.
-    const map = await Provable.witnessAsync(ValidatorsList, async () => {
-      const { map } = await checkValidatorsList({ validators, storage });
-      return map;
-    });
-    map.root.assertEquals(validators.root);
     this.emitEvent(
       "validatorsList",
       new ValidatorsListEvent({ validators, storage })

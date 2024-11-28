@@ -8,12 +8,11 @@
     "test": "NODE_NO_WARNINGS=1 node --loader=ts-node/esm --enable-source-maps -r dotenv/config --require dotenv/config --env-file=.env --test",
     "compile": "yarn test compile-testnet && yarn test compile-mainnet",
     "local": "CHAIN=local CLOUD=local WHITELIST=false yarn test test/contract.test.ts",
-    "local.whitelist": "jest contract.test --chain=local --whitelist=true",
-    "local.proofsoff": "jest contract.test --chain=local --proofs=false",
-    "devnet": "jest contract.test --chain=devnet",
-    "devnet.whitelist": "jest contract.test --chain=devnet --whitelist=true",
-    "zeko": "jest contract.test --chain=zeko --whitelist=false",
-    "zeko.whitelist": "jest contract.test --chain=zeko --whitelist=true"
+    "local:whitelist": "CHAIN=local CLOUD=local WHITELIST=true yarn test test/contract.test.ts",
+    "devnet": "CHAIN=devnet CLOUD=local WHITELIST=false yarn test test/contract.test.ts",
+    "devnet:whitelist": "CHAIN=local CLOUD=local WHITELIST=true yarn test test/contract.test.ts",
+    "zeko": "CHAIN=zeko CLOUD=local WHITELIST=false yarn test test/contract.test.ts",
+    "zeko:whitelist": "CHAIN=zeko CLOUD=local WHITELIST=true yarn test test/contract.test.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.1",
