@@ -28,7 +28,7 @@ import {
   OwnershipChangeEvent,
   OwnableContract,
 } from "../contracts/index.js";
-export { NFTAdminContract };
+export { NFTAdminContract, NFTAdminDeployProps };
 
 interface NFTAdminDeployProps extends Exclude<DeployArgs, undefined> {
   admin: PublicKey;

@@ -49,7 +49,6 @@ interface ValidatorsListData {
     authorizedToVote: boolean;
   }[];
   validatorsCount: number;
-  hashSum: string;
   root: string;
   map: IndexedMapSerialized;
 }
@@ -217,7 +216,11 @@ class VerificationKeyUpgradeAuthority
    * @param {VerificationKey} vk - The verification key to validate the proof.
    */
   @method
-  async updateDatabase(proof: ValidatorsVotingProof, vk: VerificationKey) {
+  async updateDatabase(
+    proof: ValidatorsVotingProof,
+    vk: VerificationKey,
+    validators: ValidatorsState
+  ) {
     const oldUpgradeDatabase = UpgradeDatabaseState.unpack(
       this.upgradeDatabasePacked.getAndRequireEquals()
     );
@@ -226,7 +229,8 @@ class VerificationKeyUpgradeAuthority
     await this.checkValidatorsDecision(
       proof,
       vk,
-      ValidatorDecisionType["updateDatabase"]
+      ValidatorDecisionType["updateDatabase"],
+      validators
     );
 
     // This does not create a constraint on the storage,
@@ -265,7 +269,8 @@ class VerificationKeyUpgradeAuthority
     await this.checkValidatorsDecision(
       proof,
       vk,
-      ValidatorDecisionType["updateValidatorsList"]
+      ValidatorDecisionType["updateValidatorsList"],
+      validators
     );
     await this.setValidatorsList(validators, storage);
   }
@@ -280,7 +285,8 @@ class VerificationKeyUpgradeAuthority
   async checkValidatorsDecision(
     proof: ValidatorsVotingProof,
     vk: VerificationKey,
-    decisionType: Field
+    decisionType: Field,
+    validatorsState: ValidatorsState
   ) {
     this.network.globalSlotSinceGenesis.requireBetween(
       UInt32.zero,
@@ -293,5 +299,7 @@ class VerificationKeyUpgradeAuthority
       .assertEquals(this.validators.getAndRequireEquals());
     proof.publicInput.decision.decisionType.assertEquals(decisionType);
     proof.publicInput.decision.contractAddress.assertEquals(this.address);
+    validatorsState.hash().assertEquals(this.validators.getAndRequireEquals());
+    proof.publicOutput.yesVotes.mul(2).assertGreaterThan(validatorsState.count);
   }
 }

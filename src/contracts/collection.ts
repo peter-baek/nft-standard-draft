@@ -56,7 +56,7 @@ import {
 } from "./upgradable.js";
 import { PausableContract, PauseEvent } from "./pausable.js";
 import { OwnableContract, OwnershipChangeEvent } from "./ownable.js";
-import { NFTVerificationKeys, SupportedNetworkId } from "./vk.js";
+import { nftVerificationKeys, SupportedNetworkId } from "../vk.js";
 export {
   CollectionDeployProps,
   CollectionContract,
@@ -380,12 +380,12 @@ function CollectionContract(params: {
       this.internal.mint({ address: update, amount: 1_000_000_000 });
 
       const nftVerificationKey = new VerificationKey({
-        data: NFTVerificationKeys[networkId].nft.data,
-        hash: Field(NFTVerificationKeys[networkId].nft.hash),
+        data: nftVerificationKeys[networkId].vk.NFT.data,
+        hash: Field(nftVerificationKeys[networkId].vk.NFT.hash),
       });
       // Constrain the NFT verification key to the correct one for the network
       nftVerificationKey.hash.assertEquals(
-        Field(NFTVerificationKeys[networkId].nft.hash)
+        Field(nftVerificationKeys[networkId].vk.NFT.hash)
       );
 
       const compiledVerificationKeyHash = Provable.witness(Field, () => {

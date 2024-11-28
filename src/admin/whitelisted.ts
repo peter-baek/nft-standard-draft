@@ -20,10 +20,14 @@ import {
   AccountUpdate,
   Mina,
   Poseidon,
-  Experimental,
   UInt32,
   Struct,
 } from "o1js";
+import {
+  loadIndexedMerkleMap,
+  createIpfsURL,
+  Whitelist,
+} from "@minatokens/storage";
 import {
   MintRequest,
   NFTState,
@@ -39,29 +43,25 @@ import {
   OwnershipChangeEvent,
   OwnableContract,
 } from "../contracts/index.js";
-import { loadIndexedMerkleMap, createIpfsURL } from "zkcloudworker";
-export { NFTWhitelistedAdminContract, Whitelist, PauseData };
 
-const { IndexedMerkleMap } = Experimental;
-type IndexedMerkleMap = Experimental.IndexedMerkleMap;
-const WHITELIST_HEIGHT = 20;
-
-/** Represents the whitelist using an Indexed Merkle Map. */
-class Whitelist extends IndexedMerkleMap(WHITELIST_HEIGHT) {}
+export {
+  NFTWhitelistedAdminContract,
+  PauseData,
+  NFTWhitelistedAdminDeployProps,
+};
 
 /**
  * Deployment properties for the `NFTWhitelistedAdminContract`.
  */
-export interface NFTWhitelistedAdminDeployProps
+interface NFTWhitelistedAdminDeployProps
   extends Exclude<DeployArgs, undefined> {
   /** The public key of the admin or owner of the contract. */
   admin: PublicKey;
   /** The public key of the Upgrade Authority Contract. */
   upgradeAuthority: PublicKey;
-  /** The root hash of the Merkle tree representing the whitelist. */
-  whitelistRoot: Field;
-  /** Off-chain storage information, typically an IPFS hash pointing to the whitelist data. */
-  storage: Storage;
+  /** The whitelist. */
+  whitelist: Whitelist;
+
   /** The URI of the zkApp. */
   uri: string;
   /** Flag indicating whether the contract can be paused. */
@@ -133,9 +133,7 @@ function NFTWhitelistedAdminContract(params: {
     /** The public key of the Upgrade Authority Contract. */
     @state(PublicKey) upgradeAuthority = State<PublicKey>();
     /** The root hash of the Merkle tree representing the whitelist. */
-    @state(Field) whitelistRoot = State<Field>();
-    /** Off-chain storage information, typically an IPFS hash pointing to the whitelist data. */
-    @state(Storage) storage = State<Storage>();
+    @state(Whitelist) whitelist = State<Whitelist>();
     /** Packed field containing pause-related flags. */
     @state(Field) pauseData = State<Field>();
 
@@ -147,8 +145,7 @@ function NFTWhitelistedAdminContract(params: {
       await super.deploy(props);
       this.admin.set(props.admin);
       this.upgradeAuthority.set(props.upgradeAuthority);
-      this.whitelistRoot.set(props.whitelistRoot);
-      this.storage.set(props.storage);
+      this.whitelist.set(props.whitelist);
       this.pauseData.set(
         new PauseData({
           canPause: props.canPause,
@@ -176,6 +173,8 @@ function NFTWhitelistedAdminContract(params: {
       resume: PauseEvent,
       /** Emitted when ownership of the contract changes. */
       ownershipChange: OwnershipChangeEvent,
+      /** Emitted when the whitelist is updated. */
+      updateWhitelist: Whitelist,
     };
 
     /**
@@ -204,30 +203,6 @@ function NFTWhitelistedAdminContract(params: {
       return new this.getUpgradeContractConstructor(
         this.upgradeAuthority.getAndRequireEquals()
       );
-    }
-
-    /**
-     * Checks if a given address is whitelisted for a specific amount.
-     * @param address The public key of the address to check.
-     * @param amount The amount to check against the whitelist.
-     * @returns A `Bool` indicating whether the address is whitelisted for the amount.
-     */
-    async isWhitelisted(address: PublicKey, amount: UInt64): Promise<Bool> {
-      const whitelistRoot = this.whitelistRoot.getAndRequireEquals();
-      const storage = this.storage.getAndRequireEquals();
-      const map = await Provable.witnessAsync(Whitelist, async () => {
-        return await loadIndexedMerkleMap({
-          url: createIpfsURL({ hash: storage.toString() }),
-          type: Whitelist,
-        });
-      });
-      map.root.assertEquals(whitelistRoot);
-      const key = Poseidon.hash(address.toFields());
-      map.assertIncluded(key, NFTWhitelistedAdminContractErrors.notWhitelisted);
-      const value = map.get(key);
-      value.assertLessThanOrEqual(Field(UInt64.MAXINT().value));
-      const maxAmount = UInt64.Unsafe.fromField(value);
-      return Bool(amount.lessThanOrEqual(maxAmount));
     }
 
     /**
@@ -282,16 +257,19 @@ function NFTWhitelistedAdminContract(params: {
       const pauseData = PauseData.unpack(this.pauseData.getAndRequireEquals());
       pauseData.isPaused.assertFalse("Contract is paused");
 
-      const isOwnerWhitelisted = await this.isWhitelisted(
-        mintRequest.owner,
-        UInt64.zero
+      const whitelist = this.whitelist.getAndRequireEquals();
+      const ownerAmount = await whitelist.getWhitelistedAmount(
+        mintRequest.owner
       );
-      isOwnerWhitelisted.assertTrue("Owner address not whitelisted");
+      ownerAmount.isSome.assertTrue(
+        NFTWhitelistedAdminContractErrors.notWhitelisted
+      );
+
       const sender = this.sender.getUnconstrained();
       const senderUpdate = AccountUpdate.createSigned(sender);
       senderUpdate.body.useFullCommitment = Bool(true); // prevent memo and fee change
-      const isSenderWhitelisted = await this.isWhitelisted(sender, UInt64.zero);
-      isSenderWhitelisted.assertTrue(
+      const senderAmount = await whitelist.getWhitelistedAmount(sender);
+      senderAmount.isSome.assertTrue(
         NFTWhitelistedAdminContractErrors.senderNotWhitelisted
       );
       const mintParams = await Provable.witnessAsync(
@@ -313,7 +291,10 @@ function NFTWhitelistedAdminContract(params: {
      */
     @method.returns(Bool)
     async canUpdate(input: NFTState, output: NFTState) {
-      return await this.isWhitelisted(output.owner, UInt64.zero);
+      const whitelist = this.whitelist.getAndRequireEquals();
+      return (await whitelist.getWhitelistedAmount(output.owner)).isSome.and(
+        (await whitelist.getWhitelistedAmount(input.owner)).isSome
+      );
     }
 
     /**
@@ -325,8 +306,9 @@ function NFTWhitelistedAdminContract(params: {
      */
     @method.returns(Bool)
     async canTransfer(address: PublicKey, from: PublicKey, to: PublicKey) {
-      return (await this.isWhitelisted(to, UInt64.zero)).and(
-        await this.isWhitelisted(from, UInt64.zero)
+      const whitelist = this.whitelist.getAndRequireEquals();
+      return (await whitelist.getWhitelistedAmount(to)).isSome.and(
+        (await whitelist.getWhitelistedAmount(from)).isSome
       );
     }
 
@@ -339,7 +321,11 @@ function NFTWhitelistedAdminContract(params: {
      */
     @method.returns(Bool)
     async canSell(address: PublicKey, seller: PublicKey, price: UInt64) {
-      return await this.isWhitelisted(seller, price);
+      const whitelist = this.whitelist.getAndRequireEquals();
+      const allowedPrice = (
+        await whitelist.getWhitelistedAmount(seller)
+      ).assertSome(NFTWhitelistedAdminContractErrors.notWhitelisted);
+      return price.lessThanOrEqual(allowedPrice);
     }
 
     /**
@@ -357,9 +343,16 @@ function NFTWhitelistedAdminContract(params: {
       buyer: PublicKey,
       price: UInt64
     ) {
-      return (await this.isWhitelisted(buyer, price)).and(
-        await this.isWhitelisted(seller, price)
-      );
+      const whitelist = this.whitelist.getAndRequireEquals();
+      const allowedBuyerPrice = (
+        await whitelist.getWhitelistedAmount(buyer)
+      ).assertSome(NFTWhitelistedAdminContractErrors.notWhitelisted);
+      const allowedSellerPrice = (
+        await whitelist.getWhitelistedAmount(seller)
+      ).assertSome(NFTWhitelistedAdminContractErrors.notWhitelisted);
+      return price
+        .lessThanOrEqual(allowedBuyerPrice)
+        .and(price.lessThanOrEqual(allowedSellerPrice));
     }
 
     /**
@@ -368,10 +361,10 @@ function NFTWhitelistedAdminContract(params: {
      * @param storage The storage reference for the whitelist data.
      */
     @method
-    async updateMerkleMapRoot(whitelistRoot: Field, storage: Storage) {
+    async updateMerkleMapRoot(whitelist: Whitelist) {
       await this.ensureOwnerSignature();
-      this.whitelistRoot.set(whitelistRoot);
-      this.storage.set(storage);
+      this.whitelist.set(whitelist);
+      this.emitEvent("updateWhitelist", whitelist);
     }
 
     /**

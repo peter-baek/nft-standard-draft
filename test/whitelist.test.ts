@@ -1,48 +1,38 @@
-import { describe, expect, it } from "@jest/globals";
-import {
-  serializeIndexedMap,
-  loadIndexedMerkleMap,
-  createIpfsURL,
-} from "zkcloudworker";
-import { PublicKey, Poseidon } from "o1js";
-import { pinJSON } from "./helpers/ipfs.js";
-import { Storage } from "../src/contracts/index.js";
-import { Whitelist } from "../src/admin/index.js";
-import { TEST_ACCOUNTS, PINATA_JWT } from "../env.json";
+import { describe, it } from "node:test";
+import assert from "node:assert";
+import { Field } from "o1js";
+import { Whitelist, Storage } from "@minatokens/storage";
+import { TEST_ACCOUNTS } from "../config.js";
 
-const hash = "bafkreihlc7xwtubgyjr2ug5huj6kxjcbpyoroq2f63fyhqdzcedzsoxlda";
-
+const hash = "bafkreiaqezwqytp4ne3cuxtvaihfnux6uii7mmcgydr47vu53spmppga64";
+const root =
+  "19832898645574460675189150233738669985941120585573738902441349680248352282647";
 describe("Save whitelist", () => {
   it.skip("should save whitelist", async () => {
-    const whitelist = createWhitelist();
-    const serialized = serializeIndexedMap(whitelist);
-    console.log(serialized);
-    const ipfsHash = await pinJSON({
-      data: { map: serialized },
-      name: "whitelist",
-      auth: PINATA_JWT,
-    });
-    console.log(ipfsHash);
+    const whitelist = await createWhitelist();
+    console.log("ipfs:", whitelist.storage.toString());
+    console.log("root:", whitelist.root.toJSON());
   });
+
   it("should load whitelist", async () => {
-    const whitelist = createWhitelist();
-    const root = whitelist.root;
-    console.log(root.toJSON());
-    const loaded = await loadIndexedMerkleMap({
-      url: createIpfsURL({ hash }),
-      type: Whitelist,
+    const whitelist = new Whitelist({
+      root: Field.fromJSON(root),
+      storage: Storage.fromString(hash),
     });
-    console.log(loaded.root.toJSON());
+    const map = (await whitelist.load()).assertSome();
+    console.log(map.root.toJSON());
+    assert.deepEqual(map.root.toJSON(), root);
   });
 });
 
-function createWhitelist() {
-  const whitelist = new Whitelist();
-  const users = TEST_ACCOUNTS.slice(5)
-    .map((account) => PublicKey.fromBase58(account.publicKey))
-    .slice(0, 5);
-  for (const user of users) {
-    whitelist.insert(Poseidon.hash(user.toFields()), 50_000_000_000n);
-  }
+async function createWhitelist() {
+  const whitelist = await Whitelist.create({
+    list: TEST_ACCOUNTS.slice(5)
+      .map((user) => ({
+        address: user.publicKey,
+        amount: 50_000_000_000,
+      }))
+      .slice(0, 5),
+  });
   return whitelist;
 }

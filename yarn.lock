@@ -45,6 +45,17 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@minatokens/storage@npm:^0.1.0":
+  version: 0.1.0
+  resolution: "@minatokens/storage@npm:0.1.0"
+  dependencies:
+    tslib: "npm:^2.8.1"
+  peerDependencies:
+    o1js: ^2.1.0
+  checksum: 10c0/657e73973dbe5f844b1e3ee4ea4eb4ecf8057983f53e1eeeca7067273326b4d2adb07d625783a73d23292b693d67ae8c6971b3878cd3ac66c7d1ca49ba79f714
+  languageName: node
+  linkType: hard
+
 "@tsconfig/node10@npm:^1.0.7":
   version: 1.0.11
   resolution: "@tsconfig/node10@npm:1.0.11"
@@ -116,7 +127,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"blakejs@npm:1.2.1":
+"blakejs@npm:1.2.1, blakejs@npm:^1.2.1":
   version: 1.2.1
   resolution: "blakejs@npm:1.2.1"
   checksum: 10c0/c284557ce55b9c70203f59d381f1b85372ef08ee616a90162174d1291a45d3e5e809fdf9edab6e998740012538515152471dc4f1f9dbfa974ba2b9c1f7b9aad7
@@ -208,12 +219,24 @@ __metadata:
   languageName: node
   linkType: hard
 
+"mina-signer@npm:^3.0.7":
+  version: 3.0.7
+  resolution: "mina-signer@npm:3.0.7"
+  dependencies:
+    blakejs: "npm:^1.2.1"
+    js-sha256: "npm:^0.9.0"
+  checksum: 10c0/da7c7d5512d6931fdf101a7556cc5a9f0dbc83f022138a333ce9973a742a93517eb7b748735a78cf32e59f264996be90d565f5ba9d79017bda67c8fc0ada0ed3
+  languageName: node
+  linkType: hard
+
 "nft-standard-draft@workspace:.":
   version: 0.0.0-use.local
   resolution: "nft-standard-draft@workspace:."
   dependencies:
+    "@minatokens/storage": "npm:^0.1.0"
     "@types/node": "npm:^22.10.1"
     dotenv: "npm:^16.4.5"
+    mina-signer: "npm:^3.0.7"
     o1js: "npm:2.1.0"
     ts-node: "npm:^10.9.2"
     typescript: "npm:^5.7.2"
@@ -313,7 +336,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"tslib@npm:^2.3.0":
+"tslib@npm:^2.3.0, tslib@npm:^2.8.1":
   version: 2.8.1
   resolution: "tslib@npm:2.8.1"
   checksum: 10c0/9c4759110a19c53f992d9aae23aac5ced636e99887b51b9e61def52611732872ff7668757d4e4c61f19691e36f4da981cd9485e869b4a7408d689f6bf1f14e62

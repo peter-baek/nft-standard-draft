@@ -1,4 +1,5 @@
-import { describe, expect, it } from "@jest/globals";
+import { describe, it } from "node:test";
+import assert from "node:assert";
 import { Metadata, ColorPlugin } from "../src/metadata/index.js";
 import { randomMap, randomImage } from "./helpers/metadata.js";
 
@@ -30,7 +31,7 @@ describe("Test serializing and deserializing Metadata", () => {
     const serializedPublic = JSON.stringify(map.toJSON(false), null, 2);
     const serializedPrivate = JSON.stringify(map.toJSON(true), null, 2);
     if (printMetadata) console.log("Serialized", serializedPrivate);
-    expect(serializedPublic).not.toContain("isPrivate");
+    assert(!serializedPublic.includes("isPrivate"));
     const deserializedPublic = Metadata.fromJSON({
       json: JSON.parse(serializedPublic) as any,
       checkRoot: false,
@@ -41,7 +42,7 @@ describe("Test serializing and deserializing Metadata", () => {
       checkRoot: true,
       plugins: [new ColorPlugin()],
     });
-    expect(deserializedPrivate).toStrictEqual(map);
+    assert.deepStrictEqual(deserializedPrivate, map);
   });
   it("should serialize and deserialize Metadata", async () => {
     for (let i = 0; i < NUMBER_OF_ITERATIONS; i++) {
@@ -49,7 +50,7 @@ describe("Test serializing and deserializing Metadata", () => {
       const serializedPublic = JSON.stringify(map.toJSON(false), null, 2);
       const serializedPrivate = JSON.stringify(map.toJSON(true), null, 2);
       if (printMetadata) console.log("Serialized", serializedPrivate);
-      expect(serializedPublic).not.toContain("isPrivate");
+      assert(!serializedPublic.includes("isPrivate"));
       const deserializedPublic = Metadata.fromJSON({
         json: JSON.parse(serializedPublic) as any,
         checkRoot: false,
@@ -58,7 +59,7 @@ describe("Test serializing and deserializing Metadata", () => {
         json: JSON.parse(serializedPrivate) as any,
         checkRoot: true,
       });
-      expect(deserializedPrivate).toStrictEqual(map);
+      assert.deepStrictEqual(deserializedPrivate, map);
     }
   });
 });
