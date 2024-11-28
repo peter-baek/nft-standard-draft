@@ -1,0 +1,33 @@
+{
+  "name": "nft-standard-draft",
+  "version": "0.2.0",
+  "author": "DFST",
+  "type": "module",
+  "license": "Apache-2.0",
+  "scripts": {
+    "test": "NODE_NO_WARNINGS=1 node --loader=ts-node/esm --enable-source-maps -r dotenv/config --require dotenv/config --env-file=.env --test",
+    "compile": "yarn test compile-testnet && yarn test compile-mainnet",
+    "local": "CHAIN=local CLOUD=local WHITELIST=false yarn test test/contract.test.ts",
+    "local.whitelist": "jest contract.test --chain=local --whitelist=true",
+    "local.proofsoff": "jest contract.test --chain=local --proofs=false",
+    "devnet": "jest contract.test --chain=devnet",
+    "devnet.whitelist": "jest contract.test --chain=devnet --whitelist=true",
+    "zeko": "jest contract.test --chain=zeko --whitelist=false",
+    "zeko.whitelist": "jest contract.test --chain=zeko --whitelist=true"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "dotenv": "^16.4.5",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.2"
+  },
+  "node": {
+    "version": ">=20.0.0"
+  },
+  "packageManager": "yarn@4.5.0",
+  "dependencies": {
+    "o1js": "2.1.0",
+    "unique-names-generator": "^4.7.1",
+    "zkcloudworker": "^0.20.3"
+  }
+}

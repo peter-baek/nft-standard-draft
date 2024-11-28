@@ -1,0 +1,1650 @@
+import { describe, it } from "node:test";
+import assert from "node:assert";
+import {
+  Mina,
+  VerificationKey,
+  Field,
+  AccountUpdate,
+  UInt32,
+  Bool,
+  Cache,
+  UInt64,
+  fetchLastBlock,
+  PublicKey,
+  UInt8,
+  Signature,
+  Poseidon,
+  verify,
+} from "o1js";
+import {
+  fetchMinaAccount,
+  initBlockchain,
+  accountBalanceMina,
+  Memory,
+  blockchain,
+  serializeIndexedMap,
+  createIpfsURL,
+  loadIndexedMerkleMap,
+  sendTx,
+  pinJSON,
+} from "zkcloudworker";
+import { TEST_ACCOUNTS } from "../config.js";
+import {
+  NFT,
+  CollectionContract,
+  CollectionData,
+  fieldFromString,
+  Storage,
+  NFTData,
+  NFTImmutableState,
+  NFTState,
+  NFTUpdateProof,
+  NFTStateStruct,
+  MintParams,
+  VerificationKeyUpgradeData,
+  PublicKeyOption,
+} from "../src/contracts/index.js";
+import {
+  NFTAdminContract,
+  NFTWhitelistedAdminContract,
+} from "../src/admin/index.js";
+import { NFTProgram } from "../src/zkprogram/update.js";
+import {
+  VerificationKeyUpgradeAuthority,
+  ChainId,
+  UpgradeDatabaseState,
+  ValidatorsList,
+  ValidatorsState,
+  ValidatorsVoting,
+  ValidatorsListEvent,
+  ValidatorsListData,
+  checkValidatorsList,
+  UpgradeAuthorityDatabase,
+  ValidatorsDecision,
+  ValidatorDecisionType,
+  ValidatorsVotingNativeProof,
+  ValidatorsDecisionState,
+  ValidatorsVotingProof,
+} from "../src/upgrade/index.js";
+import { processArguments } from "./helpers/utils.js";
+import { NFTVerificationKeys } from "../src/contracts/vk.js";
+import { randomMetadata } from "./helpers/metadata.js";
+import { MetadataFieldTypeValues, Metadata } from "../src/metadata/index.js";
+
+let { chain, useWhitelistedAdmin, proofsEnabled } = processArguments();
+const networkId = chain === "mainnet" ? "mainnet" : "testnet";
+const expectedTxStatus = chain === "zeko" ? "pending" : "included";
+const vk = NFTVerificationKeys[networkId];
+
+const { TestPublicKey } = Mina;
+type TestPublicKey = Mina.TestPublicKey;
+
+let nftContractVk: VerificationKey;
+let nftProgramVk: VerificationKey;
+let collectionVk: VerificationKey;
+let adminVk: VerificationKey;
+let whitelistedAdminVk: VerificationKey;
+let upgradeAuthorityVk: VerificationKey;
+let validatorsVotingVk: VerificationKey;
+const cache: Cache = Cache.FileSystem("./cache");
+const zkNFTKey = TestPublicKey.random();
+const zkCollectionKey = TestPublicKey.random();
+const zkAdminKey = TestPublicKey.random();
+const upgradeAuthority = TestPublicKey.random();
+const upgradeAuthorityContract = new VerificationKeyUpgradeAuthority(
+  upgradeAuthority
+);
+const NFTAdmin = NFTAdminContract({
+  upgradeContract: VerificationKeyUpgradeAuthority,
+});
+const NFTWhitelistedAdmin = NFTWhitelistedAdminContract({
+  upgradeContract: VerificationKeyUpgradeAuthority,
+});
+const Collection = CollectionContract({
+  adminContract: useWhitelistedAdmin ? NFTWhitelistedAdmin : NFTAdmin,
+  upgradeContract: VerificationKeyUpgradeAuthority,
+  networkId: networkId,
+});
+
+const collectionContract = new Collection(zkCollectionKey);
+const tokenId = collectionContract.deriveTokenId();
+const nftContract = new NFT(zkNFTKey, tokenId);
+const adminContract = useWhitelistedAdmin
+  ? new NFTWhitelistedAdmin(zkAdminKey)
+  : new NFTAdmin(zkAdminKey);
+
+const NUMBER_OF_USERS = 5;
+let admin: TestPublicKey;
+let faucet: TestPublicKey;
+let users: TestPublicKey[] = [];
+const whitelistedUsers = TEST_ACCOUNTS.slice(NUMBER_OF_USERS)
+  .map((account) => TestPublicKey.fromBase58(account.privateKey))
+  .slice(0, NUMBER_OF_USERS);
+const validators = [
+  TestPublicKey.random(),
+  TestPublicKey.random(),
+  TestPublicKey.random(),
+];
+const creator = whitelistedUsers[0];
+let owner = creator;
+const price = UInt64.from(10_000_000_000);
+let collectionName: string;
+
+interface NFTParams {
+  name: string;
+  address: PublicKey;
+  collection: PublicKey;
+  privateMetadata: string;
+}
+
+const nftParams: NFTParams[] = [];
+
+describe("NFT contracts tests", () => {
+  it("should initialize a blockchain", async () => {
+    if (chain === "devnet" || chain === "zeko" || chain === "mainnet") {
+      await initBlockchain(chain);
+      admin = TestPublicKey.fromBase58(TEST_ACCOUNTS[0].privateKey);
+      users = TEST_ACCOUNTS.slice(1).map((account) =>
+        TestPublicKey.fromBase58(account.privateKey)
+      );
+    } else if (chain === "local") {
+      const { keys } = await initBlockchain(chain, NUMBER_OF_USERS + 2);
+      faucet = TestPublicKey(keys[0].key);
+      admin = TestPublicKey(keys[1].key);
+      users = keys.slice(2);
+    } else if (chain === "lightnet") {
+      const { keys } = await initBlockchain(chain, 7);
+
+      faucet = TestPublicKey(keys[0].key);
+      admin = TestPublicKey(keys[1].key);
+      users = keys.slice(2);
+    }
+    owner = creator;
+    assert(users.length >= NUMBER_OF_USERS);
+    console.log("chain:", chain);
+    console.log("networkId:", Mina.getNetworkId());
+
+    console.log("Collection contract address:", zkCollectionKey.toBase58());
+    console.log("Admin contract address:", zkAdminKey.toBase58());
+    console.log("NFT contract address:", zkNFTKey.toBase58());
+    console.log(
+      "Upgrade authority contract address:",
+      upgradeAuthority.toBase58()
+    );
+    console.log("WhitelistedAdmin:", useWhitelistedAdmin);
+
+    if (chain === "local" || chain === "lightnet") {
+      await fetchMinaAccount({ publicKey: faucet, force: true });
+      let nonce = Number(Mina.getAccount(faucet).nonce.toBigint());
+      let txs: (
+        | Mina.PendingTransaction
+        | Mina.RejectedTransaction
+        | Mina.IncludedTransaction
+        | undefined
+      )[] = [];
+
+      for (const user of whitelistedUsers) {
+        await fetchMinaAccount({ publicKey: user, force: true });
+        const transaction = await Mina.transaction(
+          {
+            sender: users[0],
+            fee: 100_000_000,
+            memo: "topup",
+            nonce: nonce++,
+          },
+          async () => {
+            const senderUpdate = AccountUpdate.createSigned(users[0]);
+            senderUpdate.balance.subInPlace(1000000000);
+            senderUpdate.send({ to: user, amount: 100_000_000_000 });
+          }
+        );
+        txs.push(
+          await sendTx({
+            tx: transaction.sign([users[0].key]),
+            description: "topup",
+            wait: false,
+          })
+        );
+      }
+      for (const tx of txs) {
+        if (tx?.status === "pending") {
+          const txIncluded = await tx.safeWait();
+          if (txIncluded.status !== expectedTxStatus) {
+            throw new Error("Transaction not included");
+          } else {
+            console.log("Topup tx included:", txIncluded.hash);
+          }
+        } else throw new Error("Topup transaction not pending");
+      }
+      console.log("Topup done");
+    }
+
+    console.log(
+      "Creator",
+      creator.toBase58(),
+      "balance:",
+      await accountBalanceMina(creator)
+    );
+    console.log(
+      "Admin  ",
+      admin.toBase58(),
+      "balance:",
+      await accountBalanceMina(admin)
+    );
+    for (let i = 0; i < NUMBER_OF_USERS; i++) {
+      console.log(
+        `User ${i} `,
+        users[i].toBase58(),
+        "balance:",
+        await accountBalanceMina(users[i])
+      );
+    }
+    Memory.info("before compiling");
+  });
+
+  it("should compile NFT Contract", async () => {
+    console.log("compiling...");
+    console.time("compiled NFTContract");
+    const { verificationKey } = await NFT.compile({ cache });
+    nftContractVk = verificationKey;
+    console.timeEnd("compiled NFTContract");
+    assert.strictEqual(nftContractVk.hash.toJSON(), vk.nft.hash);
+    assert.strictEqual(nftContractVk.data, vk.nft.data);
+  });
+
+  it("should compile Admin", async () => {
+    console.time("compiled Admin");
+    const { verificationKey } = await NFTAdmin.compile({ cache });
+    adminVk = verificationKey;
+    console.timeEnd("compiled Admin");
+    console.log("Admin vk hash:", adminVk.hash.toJSON());
+    assert.strictEqual(
+      adminVk.hash.toJSON(),
+      "27968039045891100927648704666754528771275213274406212289757761318443521844298"
+    );
+  });
+
+  it("should compile WhitelistedAdmin", async () => {
+    console.time("compiled WhitelistedAdmin");
+    const { verificationKey } = await NFTWhitelistedAdmin.compile({ cache });
+    whitelistedAdminVk = verificationKey;
+    console.timeEnd("compiled WhitelistedAdmin");
+    console.log("WhitelistedAdmin vk hash:", whitelistedAdminVk.hash.toJSON());
+  });
+
+  it("should compile UpgradeAuthority", async () => {
+    console.time("compiled UpgradeAuthority");
+    const { verificationKey } = await VerificationKeyUpgradeAuthority.compile({
+      cache,
+    });
+    upgradeAuthorityVk = verificationKey;
+    console.timeEnd("compiled UpgradeAuthority");
+    console.log("UpgradeAuthority vk hash:", upgradeAuthorityVk.hash.toJSON());
+  });
+
+  it("should compile ValidatorsVoting", async () => {
+    console.time("compiled ValidatorsVoting");
+    const { verificationKey } = await ValidatorsVoting.compile({ cache });
+    validatorsVotingVk = verificationKey;
+    console.timeEnd("compiled ValidatorsVoting");
+    console.log("ValidatorsVoting vk hash:", validatorsVotingVk.hash.toJSON());
+  });
+
+  it("should compile Collection", async () => {
+    console.time("compiled Collection");
+    const { verificationKey } = await Collection.compile({ cache });
+    collectionVk = verificationKey;
+    console.timeEnd("compiled Collection");
+    console.log("Collection vk hash:", collectionVk.hash.toJSON());
+    assert.strictEqual(collectionVk.hash.toJSON(), vk.collection.hash);
+    assert.strictEqual(collectionVk.data, vk.collection.data);
+  });
+
+  it("should compile nft ZkProgram", async () => {
+    console.time("compiled NFTProgram");
+    nftProgramVk = (await NFTProgram.compile({ cache })).verificationKey;
+    console.timeEnd("compiled NFTProgram");
+    console.log("NFTProgram vk hash:", nftProgramVk.hash.toJSON());
+  });
+
+  it("should analyze contracts methods", async () => {
+    console.log("Analyzing contracts methods...");
+    console.time("methods analyzed");
+    const methods = [
+      {
+        name: "NFT",
+        result: await NFT.analyzeMethods(),
+        skip: false,
+      },
+      {
+        name: "Admin",
+        result: await NFTAdmin.analyzeMethods(),
+        skip: false,
+      },
+      {
+        name: "WhitelistedAdmin",
+        result: await NFTWhitelistedAdmin.analyzeMethods(),
+        skip: false,
+      },
+      {
+        name: "UpgradeAuthority",
+        result: await VerificationKeyUpgradeAuthority.analyzeMethods(),
+        skip: false,
+      },
+      {
+        name: "Collection",
+        result: await Collection.analyzeMethods(),
+        skip: false,
+      },
+      {
+        name: "NFTProgram",
+        result: await NFTProgram.analyzeMethods(),
+        skip: true,
+      },
+    ];
+    console.timeEnd("methods analyzed");
+    const maxRows = 2 ** 16;
+    for (const contract of methods) {
+      // calculate the size of the contract - the sum or rows for each method
+      const size = Object.values(contract.result).reduce(
+        (acc, method) => acc + (method as any).rows,
+        0
+      );
+      // calculate percentage rounded to 0 decimal places
+      const percentage =
+        Math.round((((size as number) * 100) / maxRows) * 100) / 100;
+
+      console.log(
+        `method's total size for a ${contract.name} is ${size} rows (${percentage}% of max ${maxRows} rows)`
+      );
+      // if (contract.skip !== true)
+      //   for (const method in contract.result) {
+      //     console.log(method, `rows:`, (contract.result as any)[method].rows);
+      //   }
+    }
+  });
+
+  it("should deploy an UpgradeAuthority", async () => {
+    Memory.info("before deploy");
+    console.time("deployed UpgradeAuthority");
+    const validatorsList = new ValidatorsList();
+    const validatorsCount = 2; // majority is 2 validators out of 3
+    const list: { key: TestPublicKey; authorizedToVote: boolean }[] = [
+      { key: validators[0], authorizedToVote: true },
+      { key: TestPublicKey.random(), authorizedToVote: false },
+      { key: validators[1], authorizedToVote: true },
+      { key: validators[2], authorizedToVote: true },
+      { key: TestPublicKey.random(), authorizedToVote: false },
+    ];
+    let hashSum = Field(0);
+
+    for (let i = 0; i < list.length; i++) {
+      const key = Poseidon.hashPacked(PublicKey, list[i].key);
+      hashSum = hashSum.add(key);
+      validatorsList.set(key, Field(Bool(list[i].authorizedToVote).value));
+    }
+
+    const data: ValidatorsListData = {
+      validators: list.map((v) => ({
+        publicKey: v.key.toBase58(),
+        authorizedToVote: v.authorizedToVote,
+      })),
+      validatorsCount,
+      hashSum: hashSum.toJSON(),
+      root: validatorsList.root.toJSON(),
+      map: serializeIndexedMap(validatorsList),
+    };
+
+    const ipfs = await pinJSON({
+      data,
+      name: "upgrade-authority-list",
+    });
+    if (!ipfs) {
+      throw new Error("List IPFS hash is undefined");
+    }
+
+    const validatorState = new ValidatorsState({
+      chainId: ChainId[chain === "devnet" ? "mina:devnet" : "zeko:devnet"],
+      root: validatorsList.root,
+      hashSum,
+      count: UInt32.from(validatorsCount),
+    });
+
+    await fetchMinaAccount({ publicKey: admin, force: true });
+    const tx = await Mina.transaction(
+      {
+        sender: admin,
+        fee: 100_000_000,
+        memo: `Deploy UpgradeAuthority`,
+      },
+      async () => {
+        AccountUpdate.fundNewAccount(admin, 1);
+        // deploy() and initialize() create 2 account updates for the same publicKey, it is intended
+        await upgradeAuthorityContract.deploy();
+        await upgradeAuthorityContract.initialize(
+          validatorState,
+          Storage.fromString(ipfs),
+          validatorsVotingVk.hash
+        );
+      }
+    );
+    await tx.prove();
+    assert.strictEqual(
+      (
+        await sendTx({
+          tx: tx.sign([admin.key, upgradeAuthority.key]),
+          description: "deploy UpgradeAuthority",
+        })
+      )?.status,
+      expectedTxStatus
+    );
+    console.timeEnd("deployed UpgradeAuthority");
+  });
+
+  it("should deploy a Collection", async () => {
+    console.time("deployed Collection");
+    const { metadataRoot, ipfsHash, serializedMap, name, privateMetadata } =
+      await randomMetadata({
+        includePrivateTraits: false,
+        includeBanner: true,
+      });
+    collectionName = name;
+    const slot =
+      chain === "local"
+        ? Mina.currentSlot()
+        : chain === "zeko"
+        ? UInt32.zero
+        : (await fetchLastBlock()).globalSlotSinceGenesis;
+    const expiry = slot.add(UInt32.from(100000));
+    const masterNFT = new MintParams({
+      name: fieldFromString(name),
+      address: zkCollectionKey,
+      tokenId,
+      owner: creator,
+      data: NFTData.new(),
+      fee: UInt64.zero,
+      metadata: metadataRoot,
+      storage: Storage.fromString(ipfsHash),
+      metadataVerificationKeyHash: Field(0),
+      expiry,
+    });
+    await fetchMinaAccount({ publicKey: creator, force: true });
+
+    const tx = await Mina.transaction(
+      {
+        sender: creator,
+        fee: 100_000_000,
+        memo: `Deploy Collection ${name}`.substring(0, 30),
+      },
+      async () => {
+        AccountUpdate.fundNewAccount(creator, 3);
+
+        if (adminContract instanceof NFTWhitelistedAdmin) {
+          await adminContract.deploy({
+            admin: creator,
+            upgradeAuthority,
+            storage: Storage.fromString(
+              "bafkreifnh27z5nx3bcd73ou26vrcafe2imgeikifmynspgwlqlhwh37xri" // from whitelist.test.ts
+            ),
+            whitelistRoot: Field.fromJSON(
+              `19832898645574460675189150233738669985941120585573738902441349680248352282647` // from whitelist.test.ts
+            ),
+            uri: `zkcloudworker@$0.18.29#NFTWhitelistedAdmin`,
+            isPaused: Bool(false),
+            canPause: Bool(true),
+          });
+        } else {
+          await adminContract.deploy({
+            admin: creator,
+            upgradeAuthority,
+            uri: `zkcloudworker@0.18.29#NFTAdmin`,
+            isPaused: Bool(false),
+            canPause: Bool(true),
+          });
+        }
+        // deploy() and initialize() create 2 account updates for the same publicKey, it is intended
+        await collectionContract.deploy({
+          creator,
+          collectionName: fieldFromString(name),
+          baseURL: fieldFromString("ipfs"),
+          admin: zkAdminKey,
+          symbol: "NFT",
+          url: `https://${chain}.minanft.io`,
+        });
+        await collectionContract.initialize(
+          masterNFT,
+          CollectionData.new({
+            upgradeAuthority,
+            requireTransferApproval: true,
+            requireSaleApproval: true,
+            requireBuyApproval: true,
+            requireUpdateApproval: true,
+            royaltyFee: 10, // 10%
+            transferFee: 1_000_000_000, // 1 MINA
+          })
+        );
+      }
+    );
+    await tx.prove();
+    assert.strictEqual(
+      (
+        await sendTx({
+          tx: tx.sign([
+            creator.key,
+            zkCollectionKey.key,
+            zkAdminKey.key,
+            upgradeAuthority.key,
+          ]),
+          description: "deploy Collection",
+        })
+      )?.status,
+      expectedTxStatus
+    );
+    console.timeEnd("deployed Collection");
+  });
+
+  it("should mint NFT", async () => {
+    Memory.info("before mint");
+    console.time("minted NFT");
+    const {
+      name,
+      ipfsHash,
+      metadataRoot,
+      privateMetadata,
+      serializedMap,
+      map,
+    } = await randomMetadata();
+    nftParams.push({
+      name,
+      address: zkNFTKey,
+      collection: zkCollectionKey,
+      privateMetadata,
+    });
+    await fetchMinaAccount({ publicKey: creator, force: true });
+    await fetchMinaAccount({ publicKey: zkCollectionKey, force: true });
+    await fetchMinaAccount({ publicKey: zkAdminKey, force: true });
+    owner = creator;
+    const slot =
+      chain === "local"
+        ? Mina.currentSlot()
+        : chain === "zeko"
+        ? UInt32.zero
+        : (await fetchLastBlock()).globalSlotSinceGenesis;
+    const expiry = slot.add(UInt32.from(100000));
+    const tx = await Mina.transaction(
+      {
+        sender: creator,
+        fee: 100_000_000,
+        memo: `Mint NFT ${name}`.substring(0, 30),
+      },
+      async () => {
+        await collectionContract.mintByCreator({
+          name: fieldFromString(name),
+          address: zkNFTKey,
+          tokenId,
+          owner,
+          metadata: metadataRoot,
+          data: NFTData.new({
+            canChangeMetadata: true,
+            canPause: true,
+          }),
+          metadataVerificationKeyHash: nftProgramVk.hash,
+          expiry,
+          fee: UInt64.from(10_000_000_000),
+          storage: Storage.fromString(ipfsHash),
+        });
+      }
+    );
+    await tx.prove();
+    assert.strictEqual(
+      (
+        await sendTx({
+          tx: tx.sign([creator.key, zkNFTKey.key]),
+          description: "mint",
+        })
+      )?.status,
+      expectedTxStatus
+    );
+    await fetchMinaAccount({ publicKey: zkNFTKey, tokenId, force: true });
+    const nft = new NFT(zkNFTKey, tokenId);
+    const ownerCheck = nft.owner.get();
+    assert.strictEqual(ownerCheck.equals(creator).toBoolean(), true);
+    console.timeEnd("minted NFT");
+  });
+
+  it("should sell NFT", async () => {
+    Memory.info("before sell");
+    console.time("sold NFT");
+    const seller = creator;
+    await fetchMinaAccount({ publicKey: seller, force: true });
+    await fetchMinaAccount({ publicKey: zkCollectionKey, force: true });
+    await fetchMinaAccount({ publicKey: zkAdminKey, force: true });
+    await fetchMinaAccount({ publicKey: zkNFTKey, tokenId, force: true });
+    const requireSaleApproval = CollectionData.unpack(
+      collectionContract.packedData.get()
+    ).requireSaleApproval.toBoolean();
+    console.log("requireSaleApproval", requireSaleApproval);
+    const nft = nftParams.find(
+      (p) =>
+        p.address.equals(zkNFTKey).toBoolean() &&
+        p.collection.equals(zkCollectionKey).toBoolean()
+    );
+    if (!nft) {
+      throw new Error("NFT not found");
+    }
+    const { name } = nft;
+
+    let success = true;
+    try {
+      const tx = await Mina.transaction(
+        {
+          sender: seller,
+          fee: 100_000_000,
+          memo: `Sell NFT ${name}`.substring(0, 30),
+        },
+        async () => {
+          if (!requireSaleApproval) {
+            await collectionContract.sellWithApproval(zkNFTKey, price);
+          } else {
+            await collectionContract.sell(zkNFTKey, price);
+          }
+        }
+      );
+      await tx.prove();
+      await sendTx({
+        tx: tx.sign([seller.key]),
+        description: "sell attempt",
+      });
+    } catch (e: any) {
+      success = false;
+      console.error(
+        `Attempt to sell NFT with wrong approval failed: ${e?.message ?? ""}`
+      );
+    }
+    assert.strictEqual(success, false);
+
+    const tx = await Mina.transaction(
+      {
+        sender: seller,
+        fee: 100_000_000,
+        memo: `Sell NFT ${name}`.substring(0, 30),
+      },
+      async () => {
+        if (requireSaleApproval) {
+          await collectionContract.sellWithApproval(zkNFTKey, price);
+        } else {
+          await collectionContract.sell(zkNFTKey, price);
+        }
+      }
+    );
+    await tx.prove();
+    assert.strictEqual(
+      (
+        await sendTx({
+          tx: tx.sign([seller.key]),
+          description: "sell",
+        })
+      )?.status,
+      expectedTxStatus
+    );
+
+    console.timeEnd("sold NFT");
+  });
+
+  it("should buy NFT", async () => {
+    Memory.info("before buy");
+    console.time("bought NFT");
+    const buyer = whitelistedUsers[1];
+    await fetchMinaAccount({ publicKey: buyer, force: true });
+    await fetchMinaAccount({ publicKey: zkCollectionKey, force: true });
+    await fetchMinaAccount({ publicKey: zkAdminKey, force: true });
+    await fetchMinaAccount({ publicKey: zkNFTKey, tokenId, force: true });
+    const requireBuyApproval = CollectionData.unpack(
+      collectionContract.packedData.get()
+    ).requireBuyApproval.toBoolean();
+    console.log("requireBuyApproval", requireBuyApproval);
+    const nft = nftParams.find(
+      (p) =>
+        p.address.equals(zkNFTKey).toBoolean() &&
+        p.collection.equals(zkCollectionKey).toBoolean()
+    );
+    if (!nft) {
+      throw new Error("NFT not found");
+    }
+    const { name } = nft;
+
+    let success = true;
+    try {
+      const tx = await Mina.transaction(
+        {
+          sender: buyer,
+          fee: 100_000_000,
+          memo: `Buy NFT ${name}`.substring(0, 30),
+        },
+        async () => {
+          if (!requireBuyApproval) {
+            await collectionContract.buyWithApproval(zkNFTKey, price);
+          } else {
+            await collectionContract.buy(zkNFTKey, price);
+          }
+        }
+      );
+      await tx.prove();
+      await sendTx({
+        tx: tx.sign([buyer.key]),
+        description: "buy",
+      });
+      owner = buyer;
+    } catch (e: any) {
+      success = false;
+      console.error(
+        `Attempt to buy NFT with wrong approval failed: ${e?.message ?? ""}`
+      );
+    }
+    assert.strictEqual(success, false);
+
+    const tx = await Mina.transaction(
+      {
+        sender: buyer,
+        fee: 100_000_000,
+        memo: `Buy NFT ${name}`.substring(0, 30),
+      },
+      async () => {
+        if (requireBuyApproval) {
+          await collectionContract.buyWithApproval(zkNFTKey, price);
+        } else {
+          await collectionContract.buy(zkNFTKey, price);
+        }
+      }
+    );
+    await tx.prove();
+    assert.strictEqual(
+      (
+        await sendTx({
+          tx: tx.sign([buyer.key]),
+          description: "buy",
+        })
+      )?.status,
+      expectedTxStatus
+    );
+    console.timeEnd("bought NFT");
+    owner = buyer;
+  });
+
+  it("should update NFT metadata", async () => {
+    Memory.info("before update");
+    console.time("updated NFT");
+
+    await fetchMinaAccount({ publicKey: owner, force: true });
+    await fetchMinaAccount({ publicKey: zkCollectionKey, force: true });
+    await fetchMinaAccount({ publicKey: zkAdminKey, force: true });
+    await fetchMinaAccount({ publicKey: zkNFTKey, tokenId, force: true });
+    const nftAccount = Mina.getAccount(zkNFTKey, tokenId);
+    const nftStateStruct = NFTStateStruct.fromAccount(nftAccount);
+    assert.strictEqual(
+      nftAccount.zkapp?.verificationKey?.hash.toJSON(),
+      nftContractVk.hash.toJSON()
+    );
+    const requireUpdateApproval = CollectionData.unpack(
+      collectionContract.packedData.get()
+    ).requireUpdateApproval.toBoolean();
+    console.log("requireUpdateApproval", requireUpdateApproval);
+    const nftState = NFTState.fromNFTState({
+      nftState: nftStateStruct,
+      creator: creator,
+      address: zkNFTKey,
+      tokenId,
+    });
+
+    const index = nftParams.findIndex(
+      (p) =>
+        p.address.equals(zkNFTKey).toBoolean() &&
+        p.collection.equals(zkCollectionKey).toBoolean()
+    );
+    if (index === -1) {
+      throw new Error("NFT not found");
+    }
+    const nft = nftParams[index];
+    const { name } = nft;
+    const metadata = Metadata.fromJSON({
+      json: JSON.parse(nft.privateMetadata),
+      checkRoot: true,
+    });
+    assert.strictEqual(nftState.metadata.toJSON(), metadata.map.root.toJSON());
+    if (nftState.metadata.toJSON() !== metadata.map.root.toJSON()) {
+      throw new Error(
+        "NFT metadata is not the same as the one in the collection"
+      );
+    }
+
+    console.time("proved update 1");
+    const map1 = metadata.map.clone();
+    let { key: key1, value: value1 } = metadata.addTrait({
+      key: "New Key 1",
+      value: "New Value 1",
+      type: "string",
+    });
+    const signature1 = Signature.create(owner.key, [
+      ...NFTState.toFields(nftState),
+      key1,
+      value1.hash(),
+    ]);
+
+    const update1 = await NFTProgram.insertMetadata(
+      nftState,
+      map1,
+      key1,
+      value1.hash(),
+      signature1
+    );
+
+    console.timeEnd("proved update 1");
+    assert.strictEqual(
+      update1.auxiliaryOutput.root.toJSON(),
+      metadata.map.root.toJSON()
+    );
+    console.time("proved update 2");
+    const map2 = metadata.map.clone();
+    const { key: key2, value: value2 } = metadata.addTrait({
+      key: "New Key 2",
+      value: "New Value 2",
+      type: "string",
+    });
+    const signature2 = Signature.create(owner.key, [
+      ...NFTState.toFields(update1.proof.publicOutput),
+      key2,
+      value2.hash(),
+    ]);
+
+    const update2 = await NFTProgram.insertMetadata(
+      update1.proof.publicOutput,
+      map2,
+      key2,
+      value2.hash(),
+      signature2
+    );
+    console.timeEnd("proved update 2");
+    assert.strictEqual(
+      update2.auxiliaryOutput.root.toJSON(),
+      metadata.map.root.toJSON()
+    );
+    console.time("merged proofs");
+    const mergedProof = await NFTProgram.merge(
+      nftState,
+      update1.proof,
+      update2.proof
+    );
+    const dynamicProof = NFTUpdateProof.fromProof(mergedProof.proof);
+    console.timeEnd("merged proofs");
+
+    let success = true;
+    try {
+      const tx = await Mina.transaction(
+        {
+          sender: owner,
+          fee: 100_000_000,
+          memo: `Update NFT ${name}`.substring(0, 30),
+        },
+        async () => {
+          if (!requireUpdateApproval) {
+            await collectionContract.updateWithApproval(
+              dynamicProof,
+              nftProgramVk
+            );
+          } else {
+            await collectionContract.update(dynamicProof, nftProgramVk);
+          }
+        }
+      );
+      await tx.prove();
+      await sendTx({
+        tx: tx.sign([owner.key]),
+        description: "update attempt",
+      });
+    } catch (e: any) {
+      success = false;
+      console.error(
+        `Attempt to update NFT with wrong approval failed: ${e?.message ?? ""}`
+      );
+    }
+    assert.strictEqual(success, false);
+
+    const tx = await Mina.transaction(
+      {
+        sender: owner,
+        fee: 100_000_000,
+        memo: `Update NFT ${name}`.substring(0, 30),
+      },
+      async () => {
+        if (requireUpdateApproval) {
+          await collectionContract.updateWithApproval(
+            dynamicProof,
+            nftProgramVk
+          );
+        } else {
+          await collectionContract.update(dynamicProof, nftProgramVk);
+        }
+      }
+    );
+    await tx.prove();
+    assert.strictEqual(
+      (
+        await sendTx({
+          tx: tx.sign([owner.key]),
+          description: "update",
+        })
+      )?.status,
+      expectedTxStatus
+    );
+    console.timeEnd("updated NFT");
+    nftParams[index].privateMetadata = JSON.stringify(
+      metadata.toJSON(true),
+      null,
+      2
+    );
+  });
+
+  it("should transfer NFT", async () => {
+    Memory.info("before transfer");
+    console.time("transferred NFT");
+    await fetchMinaAccount({ publicKey: owner, force: true });
+    await fetchMinaAccount({ publicKey: zkCollectionKey, force: true });
+    await fetchMinaAccount({ publicKey: zkAdminKey, force: true });
+    await fetchMinaAccount({ publicKey: zkNFTKey, tokenId, force: true });
+    const requireTransferApproval = CollectionData.unpack(
+      collectionContract.packedData.get()
+    ).requireTransferApproval.toBoolean();
+    console.log("requireTransferApproval", requireTransferApproval);
+    const to = whitelistedUsers[2];
+    const nft = nftParams.find(
+      (p) =>
+        p.address.equals(zkNFTKey).toBoolean() &&
+        p.collection.equals(zkCollectionKey).toBoolean()
+    );
+    if (!nft) {
+      throw new Error("NFT not found");
+    }
+    const { name } = nft;
+
+    let success = true;
+    try {
+      const tx = await Mina.transaction(
+        {
+          sender: owner,
+          fee: 100_000_000,
+          memo: `Transfer NFT ${name}`.substring(0, 30),
+        },
+        async () => {
+          if (!requireTransferApproval) {
+            await collectionContract.transferWithApproval(zkNFTKey, to);
+          } else {
+            await collectionContract.transfer(zkNFTKey, to);
+          }
+        }
+      );
+      await tx.prove();
+      await sendTx({
+        tx: tx.sign([owner.key]),
+        description: "transfer attempt",
+      });
+    } catch (e: any) {
+      success = false;
+      console.error(
+        `Attempt to transfer NFT with wrong approval failed: ${
+          e?.message ?? ""
+        }`
+      );
+    }
+    assert.strictEqual(success, false);
+
+    const tx = await Mina.transaction(
+      {
+        sender: owner,
+        fee: 100_000_000,
+        memo: `Transfer NFT ${name}`.substring(0, 30),
+      },
+      async () => {
+        if (requireTransferApproval) {
+          await collectionContract.transferWithApproval(zkNFTKey, to);
+        } else {
+          await collectionContract.transfer(zkNFTKey, to);
+        }
+      }
+    );
+    await tx.prove();
+    assert.strictEqual(
+      (
+        await sendTx({
+          tx: tx.sign([owner.key]),
+          description: "transfer",
+        })
+      )?.status,
+      expectedTxStatus
+    );
+    console.timeEnd("transferred NFT");
+    owner = to;
+  });
+
+  it("should pause NFT", async () => {
+    Memory.info("before pause");
+    console.time("paused NFT");
+    await fetchMinaAccount({ publicKey: owner, force: true });
+    await fetchMinaAccount({ publicKey: zkCollectionKey, force: true });
+    await fetchMinaAccount({ publicKey: zkAdminKey, force: true });
+    await fetchMinaAccount({ publicKey: zkNFTKey, tokenId, force: true });
+    const nft = nftParams.find(
+      (p) =>
+        p.address.equals(zkNFTKey).toBoolean() &&
+        p.collection.equals(zkCollectionKey).toBoolean()
+    );
+    if (!nft) {
+      throw new Error("NFT not found");
+    }
+    const { name } = nft;
+
+    const tx = await Mina.transaction(
+      {
+        sender: owner,
+        fee: 100_000_000,
+        memo: `Pause NFT ${name}`.substring(0, 30),
+      },
+      async () => {
+        await collectionContract.pauseNFT(zkNFTKey);
+      }
+    );
+    await tx.prove();
+    assert.strictEqual(
+      (
+        await sendTx({
+          tx: tx.sign([owner.key]),
+          description: "pause NFT",
+        })
+      )?.status,
+      expectedTxStatus
+    );
+    console.timeEnd("paused NFT");
+  });
+
+  it("should fail to transfer paused NFT", async () => {
+    Memory.info("before transfer");
+    console.time("tried to transfer paused NFT");
+    await fetchMinaAccount({ publicKey: owner, force: true });
+    await fetchMinaAccount({ publicKey: zkCollectionKey, force: true });
+    await fetchMinaAccount({ publicKey: zkAdminKey, force: true });
+    await fetchMinaAccount({ publicKey: zkNFTKey, tokenId, force: true });
+    const requireTransferApproval = CollectionData.unpack(
+      collectionContract.packedData.get()
+    ).requireTransferApproval.toBoolean();
+    console.log("requireTransferApproval", requireTransferApproval);
+    const to = whitelistedUsers[3];
+    const nft = nftParams.find(
+      (p) =>
+        p.address.equals(zkNFTKey).toBoolean() &&
+        p.collection.equals(zkCollectionKey).toBoolean()
+    );
+    if (!nft) {
+      throw new Error("NFT not found");
+    }
+    const { name } = nft;
+    let transferred = true;
+    try {
+      const tx = await Mina.transaction(
+        {
+          sender: owner,
+          fee: 100_000_000,
+          memo: `Transfer NFT ${name}`.substring(0, 30),
+        },
+        async () => {
+          if (requireTransferApproval) {
+            await collectionContract.transferWithApproval(zkNFTKey, to);
+          } else {
+            await collectionContract.transfer(zkNFTKey, to);
+          }
+        }
+      );
+      await tx.prove();
+      await sendTx({
+        tx: tx.sign([owner.key]),
+        description: "tried to transfer paused NFT",
+      });
+    } catch (e: any) {
+      console.log(
+        "error during attempt to transfer paused NFT:",
+        e?.message ?? ""
+      );
+      transferred = false;
+    }
+    assert.strictEqual(transferred, false);
+    console.timeEnd("tried to transfer paused NFT");
+  });
+
+  it("should resume NFT", async () => {
+    Memory.info("before resume");
+    console.time("resumed NFT");
+    await fetchMinaAccount({ publicKey: owner, force: true });
+    await fetchMinaAccount({ publicKey: zkCollectionKey, force: true });
+    await fetchMinaAccount({ publicKey: zkAdminKey, force: true });
+    await fetchMinaAccount({ publicKey: zkNFTKey, tokenId, force: true });
+    const nft = nftParams.find(
+      (p) =>
+        p.address.equals(zkNFTKey).toBoolean() &&
+        p.collection.equals(zkCollectionKey).toBoolean()
+    );
+    if (!nft) {
+      throw new Error("NFT not found");
+    }
+    const { name } = nft;
+
+    const tx = await Mina.transaction(
+      {
+        sender: owner,
+        fee: 100_000_000,
+        memo: `Resume NFT ${name}`.substring(0, 30),
+      },
+      async () => {
+        await collectionContract.resumeNFT(zkNFTKey);
+      }
+    );
+    await tx.prove();
+    assert.strictEqual(
+      (
+        await sendTx({
+          tx: tx.sign([owner.key]),
+          description: "resume NFT",
+        })
+      )?.status,
+      expectedTxStatus
+    );
+    console.timeEnd("resumed NFT");
+  });
+
+  it("should transfer NFT", async () => {
+    Memory.info("before transfer");
+    console.time("transferred NFT");
+    await fetchMinaAccount({ publicKey: owner, force: true });
+    await fetchMinaAccount({ publicKey: zkCollectionKey, force: true });
+    await fetchMinaAccount({ publicKey: zkAdminKey, force: true });
+    await fetchMinaAccount({ publicKey: zkNFTKey, tokenId, force: true });
+    const requireTransferApproval = CollectionData.unpack(
+      collectionContract.packedData.get()
+    ).requireTransferApproval.toBoolean();
+    console.log("requireTransferApproval", requireTransferApproval);
+    const to = whitelistedUsers[3];
+    const nft = nftParams.find(
+      (p) =>
+        p.address.equals(zkNFTKey).toBoolean() &&
+        p.collection.equals(zkCollectionKey).toBoolean()
+    );
+    if (!nft) {
+      throw new Error("NFT not found");
+    }
+    const { name } = nft;
+
+    const tx = await Mina.transaction(
+      {
+        sender: owner,
+        fee: 100_000_000,
+        memo: `Transfer NFT ${name}`.substring(0, 30),
+      },
+      async () => {
+        if (requireTransferApproval) {
+          await collectionContract.transferWithApproval(zkNFTKey, to);
+        } else {
+          await collectionContract.transfer(zkNFTKey, to);
+        }
+      }
+    );
+    await tx.prove();
+    assert.strictEqual(
+      (
+        await sendTx({
+          tx: tx.sign([owner.key]),
+          description: "transfer",
+        })
+      )?.status,
+      expectedTxStatus
+    );
+    console.timeEnd("transferred NFT");
+    owner = to;
+  });
+
+  it("should pause Collection", async () => {
+    Memory.info("before pause");
+    console.time("paused Collection");
+    await fetchMinaAccount({ publicKey: creator, force: true });
+    await fetchMinaAccount({ publicKey: zkCollectionKey, force: true });
+    await fetchMinaAccount({ publicKey: zkAdminKey, force: true });
+
+    const tx = await Mina.transaction(
+      {
+        sender: creator,
+        fee: 100_000_000,
+        memo: `Pause Collection ${collectionName}`.substring(0, 30),
+      },
+      async () => {
+        await collectionContract.pause();
+      }
+    );
+    await tx.prove();
+    assert.strictEqual(
+      (
+        await sendTx({
+          tx: tx.sign([creator.key]),
+          description: "pause Collection",
+        })
+      )?.status,
+      expectedTxStatus
+    );
+    console.timeEnd("paused Collection");
+  });
+
+  it("should fail to transfer NFT on paused Collection", async () => {
+    Memory.info("before transfer");
+    console.time("tried to transfer NFT on paused Collection");
+    await fetchMinaAccount({ publicKey: owner, force: true });
+    await fetchMinaAccount({ publicKey: zkCollectionKey, force: true });
+    await fetchMinaAccount({ publicKey: zkAdminKey, force: true });
+    await fetchMinaAccount({ publicKey: zkNFTKey, tokenId, force: true });
+    const requireTransferApproval = CollectionData.unpack(
+      collectionContract.packedData.get()
+    ).requireTransferApproval.toBoolean();
+    console.log("requireTransferApproval", requireTransferApproval);
+    const to = whitelistedUsers[4];
+    const nft = nftParams.find(
+      (p) =>
+        p.address.equals(zkNFTKey).toBoolean() &&
+        p.collection.equals(zkCollectionKey).toBoolean()
+    );
+    if (!nft) {
+      throw new Error("NFT not found");
+    }
+    const { name } = nft;
+    let transferred = true;
+    try {
+      const tx = await Mina.transaction(
+        {
+          sender: owner,
+          fee: 100_000_000,
+          memo: `Transfer NFT ${name}`.substring(0, 30),
+        },
+        async () => {
+          if (requireTransferApproval) {
+            await collectionContract.transferWithApproval(zkNFTKey, to);
+          } else {
+            await collectionContract.transfer(zkNFTKey, to);
+          }
+        }
+      );
+      await tx.prove();
+      await sendTx({
+        tx: tx.sign([owner.key]),
+        description: "tried to transfer NFT on paused Collection",
+      });
+    } catch (e: any) {
+      console.log(
+        "error during attempt to transfer NFT on paused Collection:",
+        e?.message ?? ""
+      );
+      transferred = false;
+    }
+    assert.strictEqual(transferred, false);
+    console.timeEnd("tried to transfer NFT on paused Collection");
+  });
+
+  it("should resume Collection", async () => {
+    Memory.info("before resume");
+    console.time("resumed Collection");
+    await fetchMinaAccount({ publicKey: creator, force: true });
+    await fetchMinaAccount({ publicKey: zkCollectionKey, force: true });
+    await fetchMinaAccount({ publicKey: zkAdminKey, force: true });
+
+    const tx = await Mina.transaction(
+      {
+        sender: creator,
+        fee: 100_000_000,
+        memo: `Resume Collection ${collectionName}`.substring(0, 30),
+      },
+      async () => {
+        await collectionContract.resume();
+      }
+    );
+    await tx.prove();
+    assert.strictEqual(
+      (
+        await sendTx({
+          tx: tx.sign([creator.key]),
+          description: "resume Collection",
+        })
+      )?.status,
+      expectedTxStatus
+    );
+    console.timeEnd("resumed Collection");
+  });
+
+  it("should set a UpgradeAuthority database", async () => {
+    console.time("Set UpgradeAuthority");
+    await fetchMinaAccount({ publicKey: admin, force: true });
+    await fetchMinaAccount({ publicKey: upgradeAuthority, force: true });
+    const events = await upgradeAuthorityContract.fetchEvents();
+    const lastEvent = events
+      .filter((e) => e.type === "validatorsList")
+      .reverse()[0];
+    if (!lastEvent) {
+      throw new Error("No validatorsList event found");
+    }
+    const eventData = lastEvent.event.data as unknown as ValidatorsListEvent;
+
+    const storage = eventData.storage;
+    console.log("storage", storage.toString());
+
+    const { map, data } = await checkValidatorsList({
+      storage,
+    });
+    const validatorState = new ValidatorsState({
+      chainId: ChainId[chain === "devnet" ? "mina:devnet" : "zeko:devnet"],
+      root: map.root,
+      hashSum: Field.fromJSON(data.hashSum),
+      count: UInt32.from(data.validatorsCount),
+    });
+
+    const key1 = new VerificationKeyUpgradeData({
+      address: collectionContract.address,
+      tokenId: collectionContract.tokenId,
+      previousVerificationKeyHash: collectionVk.hash,
+      newVerificationKeyHash: collectionVk.hash,
+    });
+    const key2 = new VerificationKeyUpgradeData({
+      address: nftContract.address,
+      tokenId: nftContract.tokenId,
+      previousVerificationKeyHash: nftContractVk.hash,
+      newVerificationKeyHash: nftContractVk.hash,
+    });
+    console.log("adminVk.hash", adminVk.hash.toJSON());
+    const key3 = new VerificationKeyUpgradeData({
+      address: adminContract.address,
+      tokenId: adminContract.tokenId,
+      previousVerificationKeyHash: useWhitelistedAdmin
+        ? whitelistedAdminVk.hash
+        : adminVk.hash,
+      newVerificationKeyHash: useWhitelistedAdmin
+        ? whitelistedAdminVk.hash
+        : adminVk.hash,
+    });
+    const db = new UpgradeAuthorityDatabase();
+    db.set(key1.hash(), key1.newVerificationKeyHash);
+    db.set(key2.hash(), key2.newVerificationKeyHash);
+    db.set(key3.hash(), key3.newVerificationKeyHash);
+    const ipfs = await pinJSON({
+      data: { map: serializeIndexedMap(db) },
+      name: "upgrade-authority-database",
+    });
+    if (!ipfs) {
+      throw new Error("UpgradeAuthority database IPFS hash is undefined");
+    }
+
+    const decision = new ValidatorsDecision({
+      decisionType: ValidatorDecisionType["updateDatabase"],
+      contractAddress: upgradeAuthority,
+      chainId: ChainId[chain === "devnet" ? "mina:devnet" : "zeko:devnet"],
+      validators: validatorState,
+      upgradeDatabase: new UpgradeDatabaseState({
+        root: db.root,
+        storage: Storage.fromString(ipfs),
+        nextUpgradeAuthority: PublicKeyOption.none(),
+        version: UInt32.from(1),
+        validFrom: UInt32.zero,
+      }),
+      updateValidatorsList: ValidatorsState.empty(),
+      expiry: UInt32.MAXINT(),
+    });
+    const validatorsDecisionState = new ValidatorsDecisionState({
+      decision,
+      hashSum: Field(0),
+      count: UInt32.zero,
+    });
+    const proofs = [];
+
+    console.log("voting...");
+    console.time("voted");
+    for (let i = 0; i < validators.length; i++) {
+      const signature = Signature.create(
+        validators[i].key,
+        ValidatorsDecision.toFields(decision)
+      );
+
+      const state = ValidatorsDecisionState.vote(
+        decision,
+        validators[i],
+        map.clone(),
+        signature
+      );
+      const proof = await ValidatorsVoting.vote(
+        state,
+        decision,
+        validators[i],
+        map.clone(),
+        signature
+      );
+
+      proofs.push(proof);
+    }
+    let proof = proofs[0];
+    console.timeEnd("voted");
+    console.log("merging vote proofs...");
+    console.time("merged vote proofs");
+    for (let i = 1; i < proofs.length; i++) {
+      const state = ValidatorsDecisionState.merge(
+        proof.proof.publicInput,
+        proofs[i].proof.publicInput
+      );
+      const mergedProof = await ValidatorsVoting.merge(
+        state,
+        proof.proof,
+        proofs[i].proof
+      );
+      proof = mergedProof;
+      const ok = await verify(mergedProof.proof, validatorsVotingVk);
+      if (!ok) {
+        throw new Error("calculateValidatorsProof: Proof is not valid");
+      }
+    }
+    const dynamicProof = ValidatorsVotingProof.fromProof(proof.proof);
+    console.timeEnd("merged vote proofs");
+
+    await fetchMinaAccount({ publicKey: admin, force: true });
+    await fetchMinaAccount({ publicKey: upgradeAuthority, force: true });
+
+    const tx = await Mina.transaction(
+      {
+        sender: admin,
+        fee: 100_000_000,
+        memo: `Set UpgradeAuthority`,
+      },
+      async () => {
+        await upgradeAuthorityContract.updateDatabase(
+          dynamicProof,
+          validatorsVotingVk
+        );
+      }
+    );
+    await tx.prove();
+    assert.strictEqual(
+      (
+        await sendTx({
+          tx: tx.sign([admin.key]),
+          description: "Set UpgradeAuthority",
+        })
+      )?.status,
+      expectedTxStatus
+    );
+    console.timeEnd("Set UpgradeAuthority");
+  });
+
+  it("should upgrade NFT verification key", async () => {
+    Memory.info("before NFT upgrade");
+    console.time("upgraded NFT");
+    await fetchMinaAccount({ publicKey: owner, force: true });
+    await fetchMinaAccount({ publicKey: zkCollectionKey, force: true });
+    await fetchMinaAccount({ publicKey: zkAdminKey, force: true });
+    await fetchMinaAccount({ publicKey: zkNFTKey, tokenId, force: true });
+    await fetchMinaAccount({ publicKey: upgradeAuthority, force: true });
+    const requireCreatorSignatureToUpgradeNFT = CollectionData.unpack(
+      collectionContract.packedData.get()
+    ).requireCreatorSignatureToUpgradeNFT.toBoolean();
+    console.log(
+      "requireCreatorSignatureToUpgradeNFT",
+      requireCreatorSignatureToUpgradeNFT
+    );
+    const nft = nftParams.find(
+      (p) =>
+        p.address.equals(zkNFTKey).toBoolean() &&
+        p.collection.equals(zkCollectionKey).toBoolean()
+    );
+    if (!nft) {
+      throw new Error("NFT not found");
+    }
+    const { name } = nft;
+
+    const tx = await Mina.transaction(
+      {
+        sender: owner,
+        fee: 100_000_000,
+        memo: `Upgrade NFT ${name}`.substring(0, 30),
+      },
+      async () => {
+        await collectionContract.upgradeNFTVerificationKey(
+          nft.address,
+          nftContractVk
+        );
+      }
+    );
+    await tx.prove();
+    assert.strictEqual(
+      (
+        await sendTx({
+          tx: tx.sign([owner.key, creator.key]),
+          description: "upgrade NFT vk",
+        })
+      )?.status,
+      expectedTxStatus
+    );
+
+    console.timeEnd("upgraded NFT");
+  });
+
+  it("should upgrade Collection verification key", async () => {
+    Memory.info("before Collection upgrade");
+    console.time("upgraded Collection");
+
+    await fetchMinaAccount({ publicKey: creator, force: true });
+    await fetchMinaAccount({ publicKey: zkCollectionKey, force: true });
+    await fetchMinaAccount({ publicKey: zkAdminKey, force: true });
+    await fetchMinaAccount({ publicKey: upgradeAuthority, force: true });
+
+    const tx = await Mina.transaction(
+      {
+        sender: creator,
+        fee: 100_000_000,
+        memo: `Upgrade Collection ${collectionName}`.substring(0, 30),
+      },
+      async () => {
+        await collectionContract.upgradeVerificationKey(collectionVk);
+      }
+    );
+    await tx.prove();
+    assert.strictEqual(
+      (
+        await sendTx({
+          tx: tx.sign([creator.key]),
+          description: "upgrade Collection vk",
+        })
+      )?.status,
+      expectedTxStatus
+    );
+    console.timeEnd("upgraded Collection");
+  });
+
+  it("should upgrade AdminContract verification key", async () => {
+    Memory.info("before AdminContract upgrade");
+    console.time("upgraded AdminContract");
+
+    await fetchMinaAccount({ publicKey: creator, force: true });
+    await fetchMinaAccount({ publicKey: zkAdminKey, force: true });
+    await fetchMinaAccount({ publicKey: upgradeAuthority, force: true });
+    console.log("adminVk.hash", adminVk.hash.toJSON());
+
+    const tx = await Mina.transaction(
+      {
+        sender: creator,
+        fee: 100_000_000,
+        memo: `Upgrade AdminContract`.substring(0, 30),
+      },
+      async () => {
+        await adminContract.upgradeVerificationKey(
+          useWhitelistedAdmin ? whitelistedAdminVk : adminVk
+        );
+      }
+    );
+    await tx.prove();
+    assert.strictEqual(
+      (
+        await sendTx({
+          tx: tx.sign([creator.key]),
+          description: "upgrade AdminContract vk",
+        })
+      )?.status,
+      expectedTxStatus
+    );
+    console.timeEnd("upgraded AdminContract");
+  });
+
+  it("should transfer NFT", async () => {
+    Memory.info("before transfer");
+    console.time("transferred NFT");
+    await fetchMinaAccount({ publicKey: owner, force: true });
+    await fetchMinaAccount({ publicKey: zkCollectionKey, force: true });
+    await fetchMinaAccount({ publicKey: zkAdminKey, force: true });
+    await fetchMinaAccount({ publicKey: zkNFTKey, tokenId, force: true });
+    const requireTransferApproval = CollectionData.unpack(
+      collectionContract.packedData.get()
+    ).requireTransferApproval.toBoolean();
+    console.log("requireTransferApproval", requireTransferApproval);
+    const to = whitelistedUsers[4];
+    const nft = nftParams.find(
+      (p) =>
+        p.address.equals(zkNFTKey).toBoolean() &&
+        p.collection.equals(zkCollectionKey).toBoolean()
+    );
+    if (!nft) {
+      throw new Error("NFT not found");
+    }
+    const { name } = nft;
+
+    const tx = await Mina.transaction(
+      {
+        sender: owner,
+        fee: 100_000_000,
+        memo: `Transfer NFT ${name}`.substring(0, 30),
+      },
+      async () => {
+        if (requireTransferApproval) {
+          await collectionContract.transferWithApproval(zkNFTKey, to);
+        } else {
+          await collectionContract.transfer(zkNFTKey, to);
+        }
+      }
+    );
+    await tx.prove();
+    assert.strictEqual(
+      (
+        await sendTx({
+          tx: tx.sign([owner.key]),
+          description: "transfer",
+        })
+      )?.status,
+      expectedTxStatus
+    );
+    console.timeEnd("transferred NFT");
+    owner = to;
+  });
+});
