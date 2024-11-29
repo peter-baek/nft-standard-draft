@@ -26,6 +26,7 @@
   "packageManager": "yarn@4.5.0",
   "dependencies": {
     "@minatokens/storage": "^0.1.0",
+    "algoliasearch": "^5.15.0",
     "mina-signer": "^3.0.7",
     "o1js": "2.1.0",
     "unique-names-generator": "^4.7.1",

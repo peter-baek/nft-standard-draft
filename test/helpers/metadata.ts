@@ -44,6 +44,7 @@ async function randomMetadata(
   privateMetadata: string;
   serializedMap: IndexedMapSerialized;
   map: Metadata;
+  data: object;
 }> {
   const { includePrivateTraits = true, includeBanner = false } = params;
   const metadata = randomMap({ includePrivateTraits, includeBanner });
@@ -60,6 +61,7 @@ async function randomMetadata(
     privateMetadata,
     serializedMap: serializeIndexedMap(metadata.map),
     map: metadata,
+    data: metadata.toJSON(false),
   };
 }
 
