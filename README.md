@@ -1,30 +1,88 @@
-# Non-Fungible Token (NFT) Standard on Mina Protocol
+### **한글 번역**
 
-## Project Background
+#### **Mina 프로토콜의 비대체성 토큰(NFT) 표준**
 
-Non-Fungible Tokens (NFTs) have become a pivotal aspect of digital ownership, allowing creators, individuals, and corporations to represent unique digital assets on the blockchain. However, current NFT standards, like ERC721, lack essential privacy, verifiability, and versatile content integration features. The NFT standard on Mina seeks to overcome these limitations by introducing enhanced functionality such as privacy features, verifiable proofs for both public and private data, unlocking new use cases for NFTs in the realms of digital identity, secure document sharing, and multimedia content.
+---
 
-Establishing a standard for NFTs on Mina reduces the complexity for developers while enabling seamless integration with third-party applications, marketplaces, and explorers. This NFT standard leverages Mina’s zero-knowledge (ZK) capabilities to ensure that NFTs created on the platform can securely handle both public and private content while providing proofs of authenticity that can be verified both on-chain and off-chain.
+### **프로젝트 배경**
+비대체성 토큰(NFT)은 디지털 소유권의 핵심 요소가 되었으며, 창작자, 개인, 기업이 고유한 디지털 자산을 블록체인에 표현할 수 있도록 합니다. 하지만 현재 NFT 표준(예: ERC721)은 중요한 **프라이버시, 검증 가능성, 콘텐츠 통합 기능**이 부족합니다. Mina의 NFT 표준은 프라이버시 기능, 공개 및 비공개 데이터에 대한 검증 가능한 증명을 포함하여 이러한 한계를 극복하고자 하며, 디지털 신원, 안전한 문서 공유, 멀티미디어 콘텐츠와 같은 새로운 사용 사례를 지원합니다.
 
-This standard enables businesses and individuals to create NFTs that not only represent unique digital assets but also serve as secure digital identities capable of hosting and sharing sensitive data. This significantly expands the utility of NFTs beyond art into domains like Real World Assets, Gaming, Communities, and Governance.
+Mina에서의 NFT 표준을 수립함으로써 개발자의 복잡성을 줄이고 서드파티 애플리케이션, 마켓플레이스 및 탐색기와의 원활한 통합을 가능하게 합니다. 이 표준은 Mina의 **영지식(ZK) 기능**을 활용하여 NFT가 공개 및 비공개 콘텐츠를 안전하게 처리하고 온체인 및 오프체인에서 모두 검증 가능한 인증 증명을 제공합니다.
 
-## Motivation and Architecture Overview
+이 표준은 NFT를 고유한 디지털 자산으로 표현할 뿐만 아니라 민감한 데이터를 호스팅하고 공유할 수 있는 안전한 디지털 신원으로 활용할 수 있게 합니다. 이를 통해 NFT의 유용성이 예술을 넘어 **현실 자산(Real World Assets), 게임, 커뮤니티, 거버넌스**와 같은 영역으로 확장됩니다.
 
-Non-Fungible Tokens (NFTs) have become a central feature in blockchain ecosystems, enabling the ownership and exchange of unique digital assets. Establishing a standard for NFTs on the Mina Protocol will significantly simplify the creation and interaction with NFTs while ensuring that they can be easily integrated into wallets, marketplaces, and third-party applications.
+---
 
-The need for standardization goes beyond merely defining an API. NFTs on Mina will benefit from a standard implementation that can be universally used when deploying and interacting with NFT contracts. This is particularly important in Mina’s off-chain execution model, where applications need access to the contract code for verification and interaction. Without a standardized NFT contract, third-party developers, wallets, and explorers would face a significant burden when integrating with different, custom NFT contracts, as they would need to account for the unique logic and structure of each.
+### **동기와 아키텍처 개요**
+NFT는 블록체인 생태계에서 독창적인 디지털 자산의 소유 및 교환을 가능하게 하는 중심 요소가 되었습니다. Mina 프로토콜에서 NFT 표준을 수립하면 NFT 생성과 상호작용을 크게 단순화하고, 지갑, 마켓플레이스 및 서드파티 애플리케이션에 쉽게 통합할 수 있게 됩니다.
 
-The design is based on existing MinaNFT contracts V2 deployed to the mainnet. Many NFTs have already been minted, sold, and bought on the mainnet, and many creators are developing collections, providing feedback, and requesting new features.
+Mina의 **오프체인 실행 모델**에서는 NFT 계약의 표준 구현이 필수적입니다. 이것은 애플리케이션이 계약 코드에 접근하여 검증 및 상호작용해야 하기 때문입니다. 표준화되지 않은 경우, 각 NFT 계약의 고유 로직과 구조를 고려해야 하므로 서드파티 개발자, 지갑, 탐색기가 상당한 부담을 겪을 수 있습니다.
 
-To provide flexibility without altering the core NFT contracts, the design separates key administrative actions, such as whitelisting or KYC checks, into dedicated admin contracts. This ensures that the core NFT contract remains standardized while custom logic can be introduced through the admin contracts. By doing so, applications that only need to handle basic NFT operations, such as transfers or ownership verification, can interact solely with the NFT contract, ensuring compatibility across all NFTs following the standard.
+이 설계는 MinaNFT V2 계약을 기반으로 하며, 이미 메인넷에 배포되어 NFT가 민팅, 판매, 구매되고 있습니다. 창작자들은 컬렉션을 개발하면서 피드백을 제공하며 새로운 기능을 요청하고 있습니다.
 
-Additionally, Mina’s ZK architecture enhances NFTs’ functionality by allowing both on-chain and off-chain verifiability of public and private data attached to NFTs. This opens the door for NFTs representing a wide range of assets, from digital art to legal contracts and Real World Assets (RWA), while maintaining user privacy and security.
+핵심 NFT 계약을 변경하지 않고도 유연성을 제공하기 위해, **화이트리스트** 또는 **KYC 검증**과 같은 관리 작업은 전용 관리 계약(Admin Contracts)으로 분리됩니다. 이를 통해 NFT 전송이나 소유권 확인과 같은 기본 작업만 필요로 하는 애플리케이션은 NFT 계약과만 상호작용하여 표준화된 호환성을 유지할 수 있습니다.
 
-The metadata for the NFT will be stored off-chain, with the storage choice and metadata format being open. It will be possible to use metadata standards by the MinaNFT V2 and IPFS as storage options, but using this metadata standard will not be part of the standard, and it will be the NFT collection creator's choice what metadata format and storage to use.
+Mina의 ZK 아키텍처는 공개 및 비공개 데이터의 온체인 및 오프체인 검증 가능성을 제공함으로써 NFT 기능을 강화합니다. 이는 디지털 아트에서 법적 계약 및 현실 자산(Real World Assets, RWA)에 이르기까지 다양한 자산을 나타내는 NFT를 가능하게 하며, 사용자 프라이버시와 보안을 유지합니다.
 
-The recommended metadata JSON format will be a part of the standard, but the method of calculating the metadata root or hash will not.
+NFT 메타데이터는 오프체인에 저장되며, 저장 형식 및 메타데이터 포맷은 MinaNFT V2 또는 IPFS와 같은 옵션이 사용될 수 있습니다. 표준에서는 메타데이터 형식 선택을 컬렉션 제작자의 결정에 맡깁니다.
 
-By providing a standard implementation for NFT creation, management, and verification, Mina enables seamless interoperability, ensuring that all NFT-based applications can work with the same contract, reducing the complexity for developers, and enhancing the user experience across the ecosystem.
+---
+
+### **상세 아키텍처 개요**
+#### **계약 개요**
+Mina 프로토콜의 NFT 표준은 여러 계약이 협력하여 포괄적이고 유연한 기능을 제공합니다. 주요 계약은 다음과 같습니다:
+1. **NFT 컬렉션 계약(collection.ts)**  
+2. **NFT 계약(nft.ts)**  
+3. **관리 계약(admin.ts, whitelisted.ts)**  
+4. **업그레이드 계약 및 ZkProgram(upgrade.ts, validators.ts)**  
+5. **도우미 유형, 이벤트, 인터페이스(types.ts, events.ts, ownable.ts 등)**
+
+#### **NFT 컬렉션 계약(collection.ts)**
+NFT 컬렉션 계약은 컬렉션의 관리 및 NFT의 민팅, 소유권 이전, 구매/판매, 관리 계약과의 연동을 담당합니다.
+
+**주요 기능**:
+- **NFT 민팅**: 창작자 및 승인된 사용자가 새로운 NFT를 민팅할 수 있음.  
+- **소유권 이전**: 승인 여부와 관계없이 사용자 간 NFT 이전 가능.  
+- **구매 및 판매**: NFT를 판매 및 구매 가능하며, 창작자에게 로열티 지급.  
+- **계약 업그레이드**: 컬렉션 및 개별 NFT의 검증 키 업그레이드 지원.  
+- **관리 기능**: KYC/AML 검증과 같은 추가 검증 지원.  
+- **일시 중지 및 재개**: 컬렉션이나 개별 NFT의 작동을 일시 중지하거나 재개 가능.
+
+**상태 변수**:
+- **collectionName**: NFT 컬렉션 이름.  
+- **creator**: 컬렉션 창작자의 공개키(로열티 지급에 사용).  
+- **admin**: 관리 계약의 공개키.  
+- **baseURL**: NFT 메타데이터의 기본 URL.  
+- **packedData**: 플래그 및 수수료 설정 등 추가 컬렉션 매개변수를 포함한 데이터 필드.  
+
+---
+
+### **Mina만의 NFT 특징**
+1. **영지식(ZK) 기능 활용**:
+   - 공개 및 비공개 데이터를 검증할 수 있어 사용자 프라이버시와 보안 강화.
+   - 온체인 및 오프체인 검증 모두 지원.
+
+2. **유연한 관리 기능**:
+   - KYC/AML과 같은 추가 검증은 별도의 관리 계약으로 분리.
+
+3. **메타데이터 저장 옵션 제공**:
+   - 메타데이터 저장 방식과 형식 선택의 자유.
+
+4. **확장성 및 호환성**:
+   - 표준화된 NFT 계약을 통해 모든 NFT 애플리케이션과의 원활한 상호작용 가능.
+
+---
+
+### **전체 내용 요약**
+Mina 프로토콜의 NFT 표준은 **프라이버시, 검증 가능성, 관리 유연성**을 강조하며, 디지털 신원, 문서 공유, 현실 자산 등 NFT의 활용 범위를 확장합니다. 이는 Mina의 영지식 기능을 기반으로 설계되어, 개발자와 사용자 모두에게 높은 보안성과 효율성을 제공합니다.  
+
+**핵심 요약**:
+- **목표**: NFT의 기능 확장 및 사용 사례 다양화.  
+- **기능**: 프라이버시, KYC 검증, 온체인/오프체인 데이터 검증.  
+- **적용 가능성**: 디지털 아트, 현실 자산, 게임, 커뮤니티, 거버넌스.  
+- **메타데이터 유연성**: 메타데이터 형식 및 저장 방법은 창작자가 결정.  
+
+Mina의 NFT 표준은 NFT를 단순 디지털 자산에서 고급 디지털 신원 및 데이터 관리 도구로 전환하는 데 초점을 맞추고 있습니다.
 
 ## Detailed Architecture Overview
 
